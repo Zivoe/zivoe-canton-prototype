@@ -1,0 +1,113 @@
+module NavToken.IssuerRole where
+
+import DA.Assert
+import NavToken.Types
+import NavToken.MintRequest
+import NavToken.BurnRequest
+
+template IssuerRole
+  with
+    config : TokenConfig
+    currentPrice : Price
+    automation : AutomationPolicy
+  where
+    signatory config.issuer
+    observer config.treasury, automation.operators
+
+    ensure
+      currentPrice.value > 0.0
+      && currentPrice.currency == config.paymentToken.symbol
+
+    nonconsuming choice UpdatePrice : ContractId IssuerRole
+      with
+        newPrice : Price
+      controller config.issuer
+      do
+        assertMsg "price must be positive"
+          (newPrice.value > 0.0)
+
+        assertMsg "price currency must match payment token"
+          (newPrice.currency == config.paymentToken.symbol)
+
+        create this with
+          currentPrice = newPrice
+
+    nonconsuming choice RequestMint : ContractId MintRequest
+      with
+        user : Party
+        usdcxAmount : Decimal
+        minTokensOut : Decimal
+      controller user
+      do
+        assertMsg "USDCx amount must be positive"
+          (usdcxAmount > 0.0)
+
+        assertMsg "minTokensOut must be positive"
+          (minTokensOut > 0.0)
+
+        let tokensOut = usdcxAmount / currentPrice.value
+
+        assertMsg "slippage check failed"
+          (tokensOut >= minTokensOut)
+
+        create MintRequest with
+          issuerRoleCid = self
+          config
+          user
+          usdcxAmount
+          quotedPrice = currentPrice
+          minTokensOut
+
+    nonconsuming choice RequestBurn : ContractId BurnRequest
+      with
+        user : Party
+        tokenAmount : Decimal
+        minUsdcxOut : Decimal
+      controller user
+      do
+        assertMsg "token amount must be positive"
+          (tokenAmount > 0.0)
+
+        assertMsg "minUsdcxOut must be positive"
+          (minUsdcxOut > 0.0)
+
+        let usdcxOut = tokenAmount * currentPrice.value
+
+        assertMsg "slippage check failed"
+          (usdcxOut >= minUsdcxOut)
+
+        create BurnRequest with
+          issuerRoleCid = self
+          config
+          user
+          tokenAmount
+          quotedPrice = currentPrice
+          minUsdcxOut
+
+    nonconsuming choice AutoAcceptMintRequest : ()
+      with
+        mintRequestCid : ContractId MintRequest
+      controller automation.operators
+      do
+        assertMsg "automation disabled" automation.enabled
+
+        req <- fetch mintRequestCid
+
+        assertMsg "mint too large for automation"
+          (req.usdcxAmount <= automation.maxMintUsdcx)
+
+        exercise mintRequestCid AcceptMintRequest
+
+    nonconsuming choice AutoAcceptBurnRequest : ()
+      with
+        burnRequestCid : ContractId BurnRequest
+      controller automation.operators
+      do
+        assertMsg "automation disabled" automation.enabled
+
+        req <- fetch burnRequestCid
+
+        assertMsg "burn too large for automation"
+          (req.tokenAmount <= automation.maxBurnTokens)
+
+        exercise burnRequestCid AcceptBurnRequest
