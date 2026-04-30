@@ -5,18 +5,19 @@ import NavToken.Types
 
 template BurnRequest
   with
-    issuerRoleCid : ContractId IssuerRolePlaceholder
     config : TokenConfig
     user : Party
     tokenAmount : Decimal
     quotedPrice : Price
     minUsdcxOut : Decimal
+    automationOperators : [Party]
   where
     signatory user
-    observer config.issuer, config.treasury
+    observer config.issuer, config.treasury, automationOperators
 
     ensure
       tokenAmount > 0.0
+      && minUsdcxOut > 0.0
       && quotedPrice.value > 0.0
       && quotedPrice.currency == config.paymentToken.symbol
 
@@ -43,9 +44,3 @@ template BurnRequest
         -- 2. Transfer USDCx from config.treasury to user.
 
         pure ()
-
-template IssuerRolePlaceholder
-  with
-    issuer : Party
-  where
-    signatory issuer

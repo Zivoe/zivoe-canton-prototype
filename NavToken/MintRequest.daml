@@ -5,18 +5,19 @@ import NavToken.Types
 
 template MintRequest
   with
-    issuerRoleCid : ContractId IssuerRolePlaceholder
     config : TokenConfig
     user : Party
     usdcxAmount : Decimal
     quotedPrice : Price
     minTokensOut : Decimal
+    automationOperators : [Party]
   where
     signatory user
-    observer config.issuer, config.treasury
+    observer config.issuer, config.treasury, automationOperators
 
     ensure
       usdcxAmount > 0.0
+      && minTokensOut > 0.0
       && quotedPrice.value > 0.0
       && quotedPrice.currency == config.paymentToken.symbol
 
@@ -45,12 +46,3 @@ template MintRequest
         -- This is where the Canton Token Standard APIs will be called.
 
         pure ()
-
--- Temporary placeholder to avoid circular module import.
--- Later, once you wire this properly, move request choices into IssuerRole
--- or introduce a separate shared interface.
-template IssuerRolePlaceholder
-  with
-    issuer : Party
-  where
-    signatory issuer

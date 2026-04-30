@@ -32,3 +32,9 @@ data AutomationPolicy = AutomationPolicy
     maxBurnTokens : Decimal
     operators : [Party]
   deriving (Eq, Show)
+
+containsParty : Party -> [Party] -> Bool
+containsParty party parties =
+  case parties of
+    [] -> False
+    p :: rest -> p == party || containsParty party rest

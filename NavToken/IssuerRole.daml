@@ -17,8 +17,10 @@ template IssuerRole
     ensure
       currentPrice.value > 0.0
       && currentPrice.currency == config.paymentToken.symbol
+      && automation.maxMintUsdcx >= 0.0
+      && automation.maxBurnTokens >= 0.0
 
-    nonconsuming choice UpdatePrice : ContractId IssuerRole
+    choice UpdatePrice : ContractId IssuerRole
       with
         newPrice : Price
       controller config.issuer
@@ -51,12 +53,12 @@ template IssuerRole
           (tokensOut >= minTokensOut)
 
         create MintRequest with
-          issuerRoleCid = self
           config
           user
           usdcxAmount
           quotedPrice = currentPrice
           minTokensOut
+          automationOperators = automation.operators
 
     nonconsuming choice RequestBurn : ContractId BurnRequest
       with
@@ -77,21 +79,28 @@ template IssuerRole
           (usdcxOut >= minUsdcxOut)
 
         create BurnRequest with
-          issuerRoleCid = self
           config
           user
           tokenAmount
           quotedPrice = currentPrice
           minUsdcxOut
+          automationOperators = automation.operators
 
     nonconsuming choice AutoAcceptMintRequest : ()
       with
         mintRequestCid : ContractId MintRequest
-      controller automation.operators
+        operator : Party
+      controller config.issuer, operator
       do
         assertMsg "automation disabled" automation.enabled
 
+        assertMsg "operator is not authorized"
+          (containsParty operator automation.operators)
+
         req <- fetch mintRequestCid
+
+        assertMsg "mint request config mismatch"
+          (req.config == config)
 
         assertMsg "mint too large for automation"
           (req.usdcxAmount <= automation.maxMintUsdcx)
@@ -101,11 +110,18 @@ template IssuerRole
     nonconsuming choice AutoAcceptBurnRequest : ()
       with
         burnRequestCid : ContractId BurnRequest
-      controller automation.operators
+        operator : Party
+      controller config.issuer, operator
       do
         assertMsg "automation disabled" automation.enabled
 
+        assertMsg "operator is not authorized"
+          (containsParty operator automation.operators)
+
         req <- fetch burnRequestCid
+
+        assertMsg "burn request config mismatch"
+          (req.config == config)
 
         assertMsg "burn too large for automation"
           (req.tokenAmount <= automation.maxBurnTokens)
