@@ -1,0 +1,56 @@
+module NavToken.MintRequest where
+
+import DA.Assert
+import NavToken.Types
+
+template MintRequest
+  with
+    issuerRoleCid : ContractId IssuerRolePlaceholder
+    config : TokenConfig
+    user : Party
+    usdcxAmount : Decimal
+    quotedPrice : Price
+    minTokensOut : Decimal
+  where
+    signatory user
+    observer config.issuer, config.treasury
+
+    ensure
+      usdcxAmount > 0.0
+      && quotedPrice.value > 0.0
+      && quotedPrice.currency == config.paymentToken.symbol
+
+    choice CancelMintRequest : ()
+      controller user
+      do
+        pure ()
+
+    choice RejectMintRequest : ()
+      controller config.issuer
+      do
+        pure ()
+
+    choice AcceptMintRequest : ()
+      controller config.issuer
+      do
+        let tokensOut = usdcxAmount / quotedPrice.value
+
+        assertMsg "slippage check failed"
+          (tokensOut >= minTokensOut)
+
+        -- TODO CIP-56:
+        -- 1. Transfer USDCx from user to config.treasury.
+        -- 2. Mint NAV token to user.
+        --
+        -- This is where the Canton Token Standard APIs will be called.
+
+        pure ()
+
+-- Temporary placeholder to avoid circular module import.
+-- Later, once you wire this properly, move request choices into IssuerRole
+-- or introduce a separate shared interface.
+template IssuerRolePlaceholder
+  with
+    issuer : Party
+  where
+    signatory issuer
