@@ -1,0 +1,91 @@
+module NavToken.Test where
+
+import Daml.Script
+import DA.Time
+
+import NavToken.Types
+import NavToken.IssuerRole
+import NavToken.MintRequest
+import NavToken.BurnRequest
+
+testSetup : Script ()
+testSetup = script do
+  issuer <- allocateParty "Issuer"
+  treasury <- allocateParty "Treasury"
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+
+  let usdcxRef = TokenRef with
+        registry = issuer
+        symbol = "USDCx"
+        instrumentId = "USDCx-001"
+
+  let navRef = TokenRef with
+        registry = issuer
+        symbol = "NAV"
+        instrumentId = "NAV-001"
+
+  now <- getTime
+
+  let price = Price with
+        value = 1.0000
+        currency = "USDCx"
+        effectiveAt = now
+        priceId = "price-001"
+
+  let config = TokenConfig with
+        issuer = issuer
+        treasury = treasury
+        navToken = navRef
+        paymentToken = usdcxRef
+
+  let automation = AutomationPolicy with
+        enabled = True
+        maxMintUsdcx = 10000.0
+        maxBurnTokens = 10000.0
+        operators = [operator]
+
+  issuerRoleCid <- submit issuer do
+    createCmd IssuerRole with
+      config = config
+      currentPrice = price
+      automation = automation
+
+  -- Issuer updates NAV / price
+  now2 <- getTime
+
+  let newPrice = Price with
+        value = 1.0500
+        currency = "USDCx"
+        effectiveAt = now2
+        priceId = "price-002"
+
+  issuerRoleCid2 <- submit issuer do
+    exerciseCmd issuerRoleCid UpdatePrice with
+      newPrice = newPrice
+
+  -- Alice requests mint:
+  -- 1,050 USDCx at price 1.05 = 1,000 NAV tokens
+  mintReqCid <- submit alice do
+    exerciseCmd issuerRoleCid2 RequestMint with
+      user = alice
+      usdcxAmount = 1050.0
+      minTokensOut = 999.0
+
+  -- Issuer accepts mint request
+  submit issuer do
+    exerciseCmd mintReqCid AcceptMintRequest
+
+  -- Alice requests burn:
+  -- 500 NAV at price 1.05 = 525 USDCx
+  burnReqCid <- submit alice do
+    exerciseCmd issuerRoleCid2 RequestBurn with
+      user = alice
+      tokenAmount = 500.0
+      minUsdcxOut = 524.0
+
+  -- Issuer accepts burn request
+  submit issuer do
+    exerciseCmd burnReqCid AcceptBurnRequest
+
+  return ()
