@@ -1,7 +1,5 @@
 module NavToken.Types where
 
-import DA.Time
-
 data TokenRef = TokenRef
   with
     registry : Party
@@ -21,8 +19,15 @@ data TokenConfig = TokenConfig
   with
     issuer : Party
     treasury : Party
+    treasuryAdmin : Party
     navToken : TokenRef
     paymentToken : TokenRef -- USDCx
+  deriving (Eq, Show)
+
+data TreasuryAction = TreasuryAction
+  with
+    amount : Decimal
+    reason : Text
   deriving (Eq, Show)
 
 data AutomationPolicy = AutomationPolicy

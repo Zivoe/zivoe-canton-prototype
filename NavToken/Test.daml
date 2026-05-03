@@ -1,17 +1,17 @@
 module NavToken.Test where
 
 import Daml.Script
-import DA.Time
 
 import NavToken.Types
 import NavToken.IssuerRole
-import NavToken.MintRequest
-import NavToken.BurnRequest
+import NavToken.Offer
+import NavToken.Treasury
 
 testSetup : Script ()
 testSetup = script do
   issuer <- allocateParty "Issuer"
   treasury <- allocateParty "Treasury"
+  treasuryAdmin <- allocateParty "TreasuryAdmin"
   alice <- allocateParty "Alice"
   operator <- allocateParty "Operator"
 
@@ -36,6 +36,7 @@ testSetup = script do
   let config = TokenConfig with
         issuer = issuer
         treasury = treasury
+        treasuryAdmin = treasuryAdmin
         navToken = navRef
         paymentToken = usdcxRef
 
@@ -51,6 +52,11 @@ testSetup = script do
       currentPrice = price
       automation = automation
 
+  treasuryCid <- submit treasury do
+    createCmd TreasuryAccount with
+      config = config
+      usdcxBalance = 0.0
+
   -- Issuer updates NAV / price
   now2 <- getTime
 
@@ -64,28 +70,39 @@ testSetup = script do
     exerciseCmd issuerRoleCid UpdatePrice with
       newPrice = newPrice
 
+  offerCid <- submit issuer do
+    exerciseCmd issuerRoleCid2 CreateOffer with
+      user = alice
+
   -- Alice requests mint:
   -- 1,050 USDCx at price 1.05 = 1,000 NAV tokens
   mintReqCid <- submit alice do
-    exerciseCmd issuerRoleCid2 RequestMint with
-      user = alice
+    exerciseCmd offerCid RequestMint with
       usdcxAmount = 1050.0
       minTokensOut = 999.0
 
-  -- Issuer accepts mint request
-  submit issuer do
-    exerciseCmd mintReqCid AcceptMintRequest
+  -- Issuer and treasury accept mint request and collect USDCx.
+  treasuryCid2 <- submitMulti [issuer, treasury] [] do
+    exerciseCmd treasuryCid DepositFromMint with
+      mintRequestCid = mintReqCid
+
+  -- Treasury admin pulls USDCx for off-chain tokenization handling.
+  treasuryCid3 <- submitMulti [treasuryAdmin, treasury] [] do
+    exerciseCmd treasuryCid2 PullForOffchainTokenization with
+      action = TreasuryAction with
+        amount = 100.0
+        reason = "off-chain tokenization funding"
 
   -- Alice requests burn:
   -- 500 NAV at price 1.05 = 525 USDCx
   burnReqCid <- submit alice do
-    exerciseCmd issuerRoleCid2 RequestBurn with
-      user = alice
+    exerciseCmd offerCid RequestBurn with
       tokenAmount = 500.0
       minUsdcxOut = 524.0
 
-  -- Issuer accepts burn request
-  submit issuer do
-    exerciseCmd burnReqCid AcceptBurnRequest
+  -- Issuer and treasury accept burn request and return USDCx.
+  submitMulti [issuer, treasury] [] do
+    exerciseCmd treasuryCid3 ReturnForBurn with
+      burnRequestCid = burnReqCid
 
   return ()

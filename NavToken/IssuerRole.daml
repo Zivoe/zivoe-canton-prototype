@@ -1,9 +1,9 @@
 module NavToken.IssuerRole where
 
-import DA.Assert
 import NavToken.Types
 import NavToken.MintRequest
 import NavToken.BurnRequest
+import NavToken.Offer
 
 template IssuerRole
   with
@@ -34,56 +34,15 @@ template IssuerRole
         create this with
           currentPrice = newPrice
 
-    nonconsuming choice RequestMint : ContractId MintRequest
+    nonconsuming choice CreateOffer : ContractId TokenOffer
       with
         user : Party
-        usdcxAmount : Decimal
-        minTokensOut : Decimal
-      controller user
+      controller config.issuer
       do
-        assertMsg "USDCx amount must be positive"
-          (usdcxAmount > 0.0)
-
-        assertMsg "minTokensOut must be positive"
-          (minTokensOut > 0.0)
-
-        let tokensOut = usdcxAmount / currentPrice.value
-
-        assertMsg "slippage check failed"
-          (tokensOut >= minTokensOut)
-
-        create MintRequest with
+        create TokenOffer with
           config
           user
-          usdcxAmount
-          quotedPrice = currentPrice
-          minTokensOut
-          automationOperators = automation.operators
-
-    nonconsuming choice RequestBurn : ContractId BurnRequest
-      with
-        user : Party
-        tokenAmount : Decimal
-        minUsdcxOut : Decimal
-      controller user
-      do
-        assertMsg "token amount must be positive"
-          (tokenAmount > 0.0)
-
-        assertMsg "minUsdcxOut must be positive"
-          (minUsdcxOut > 0.0)
-
-        let usdcxOut = tokenAmount * currentPrice.value
-
-        assertMsg "slippage check failed"
-          (usdcxOut >= minUsdcxOut)
-
-        create BurnRequest with
-          config
-          user
-          tokenAmount
-          quotedPrice = currentPrice
-          minUsdcxOut
+          currentPrice
           automationOperators = automation.operators
 
     nonconsuming choice AutoAcceptMintRequest : ()

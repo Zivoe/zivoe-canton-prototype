@@ -1,6 +1,5 @@
 module NavToken.BurnRequest where
 
-import DA.Assert
 import NavToken.Types
 
 template BurnRequest
