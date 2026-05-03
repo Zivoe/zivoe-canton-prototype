@@ -1,0 +1,47 @@
+module NavToken.MintRequest where
+
+import NavToken.Types
+
+template MintRequest
+  with
+    config : TokenConfig
+    user : Party
+    usdcxAmount : Decimal
+    quotedPrice : Price
+    minTokensOut : Decimal
+    automationOperators : [Party]
+  where
+    signatory user
+    observer config.issuer, config.treasury, automationOperators
+
+    ensure
+      usdcxAmount > 0.0
+      && minTokensOut > 0.0
+      && quotedPrice.value > 0.0
+      && quotedPrice.currency == config.paymentToken.symbol
+
+    choice CancelMintRequest : ()
+      controller user
+      do
+        pure ()
+
+    choice RejectMintRequest : ()
+      controller config.issuer
+      do
+        pure ()
+
+    choice AcceptMintRequest : ()
+      controller config.issuer
+      do
+        let tokensOut = usdcxAmount / quotedPrice.value
+
+        assertMsg "slippage check failed"
+          (tokensOut >= minTokensOut)
+
+        -- TODO CIP-56:
+        -- 1. Transfer USDCx from user to config.treasury.
+        -- 2. Mint NAV token to user.
+        --
+        -- This is where the Canton Token Standard APIs will be called.
+
+        pure ()

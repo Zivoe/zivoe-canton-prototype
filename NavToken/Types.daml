@@ -1,0 +1,45 @@
+module NavToken.Types where
+
+data TokenRef = TokenRef
+  with
+    registry : Party
+    symbol : Text
+    instrumentId : Text
+  deriving (Eq, Show)
+
+data Price = Price
+  with
+    value : Decimal
+    currency : Text
+    effectiveAt : Time
+    priceId : Text
+  deriving (Eq, Show)
+
+data TokenConfig = TokenConfig
+  with
+    issuer : Party
+    treasury : Party
+    treasuryAdmin : Party
+    navToken : TokenRef
+    paymentToken : TokenRef -- USDCx
+  deriving (Eq, Show)
+
+data TreasuryAction = TreasuryAction
+  with
+    amount : Decimal
+    reason : Text
+  deriving (Eq, Show)
+
+data AutomationPolicy = AutomationPolicy
+  with
+    enabled : Bool
+    maxMintUsdcx : Decimal
+    maxBurnTokens : Decimal
+    operators : [Party]
+  deriving (Eq, Show)
+
+containsParty : Party -> [Party] -> Bool
+containsParty party parties =
+  case parties of
+    [] -> False
+    p :: rest -> p == party || containsParty party rest

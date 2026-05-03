@@ -1,0 +1,69 @@
+module NavToken.Offer where
+
+import NavToken.Types
+import NavToken.MintRequest
+import NavToken.BurnRequest
+
+template TokenOffer
+  with
+    config : TokenConfig
+    user : Party
+    currentPrice : Price
+    automationOperators : [Party]
+  where
+    signatory config.issuer
+    observer user, config.treasury, automationOperators
+
+    ensure
+      currentPrice.value > 0.0
+      && currentPrice.currency == config.paymentToken.symbol
+
+    nonconsuming choice RequestMint : ContractId MintRequest
+      with
+        usdcxAmount : Decimal
+        minTokensOut : Decimal
+      controller user
+      do
+        assertMsg "USDCx amount must be positive"
+          (usdcxAmount > 0.0)
+
+        assertMsg "minTokensOut must be positive"
+          (minTokensOut > 0.0)
+
+        let tokensOut = usdcxAmount / currentPrice.value
+
+        assertMsg "slippage check failed"
+          (tokensOut >= minTokensOut)
+
+        create MintRequest with
+          config
+          user
+          usdcxAmount
+          quotedPrice = currentPrice
+          minTokensOut
+          automationOperators
+
+    nonconsuming choice RequestBurn : ContractId BurnRequest
+      with
+        tokenAmount : Decimal
+        minUsdcxOut : Decimal
+      controller user
+      do
+        assertMsg "token amount must be positive"
+          (tokenAmount > 0.0)
+
+        assertMsg "minUsdcxOut must be positive"
+          (minUsdcxOut > 0.0)
+
+        let usdcxOut = tokenAmount * currentPrice.value
+
+        assertMsg "slippage check failed"
+          (usdcxOut >= minUsdcxOut)
+
+        create BurnRequest with
+          config
+          user
+          tokenAmount
+          quotedPrice = currentPrice
+          minUsdcxOut
+          automationOperators
