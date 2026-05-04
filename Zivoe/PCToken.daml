@@ -1,0 +1,223 @@
+module Zivoe.PCToken where
+
+import Cip56.HoldingV1
+import Cip56.MetadataV1
+import Cip56.TransferInstructionV1
+import Zivoe.Types
+
+tokenRefToInstrumentId : TokenRef -> InstrumentId
+tokenRefToInstrumentId tokenRef =
+  InstrumentId with
+    admin = tokenRef.registry
+    id = tokenRef.instrumentId
+
+template PCToken
+  with
+    issuer : Party
+    owner : Party
+    instrumentId : InstrumentId
+    amount : Decimal
+    lock : Optional Lock
+    meta : Metadata
+  where
+    signatory issuer
+    observer owner
+
+    ensure amount > 0.0
+
+    choice Split : (ContractId PCToken, ContractId PCToken)
+      with
+        splitAmount : Decimal
+      controller owner
+      do
+        assertMsg "split amount must be positive"
+          (splitAmount > 0.0)
+
+        assertMsg "split amount must be less than holding amount"
+          (splitAmount < amount)
+
+        splitCid <- create this with
+          amount = splitAmount
+
+        remainderCid <- create this with
+          amount = amount - splitAmount
+
+        pure (splitCid, remainderCid)
+
+    choice InstructTransfer : TransferInstructionResult
+      with
+        receiver : Party
+        transferAmount : Decimal
+        requestedAt : Time
+        executeBefore : Time
+        extraArgs : ExtraArgs
+      controller owner
+      do
+        now <- getTime
+
+        assertMsg "cannot transfer to current owner"
+          (receiver /= owner)
+
+        assertMsg "transfer amount must be positive"
+          (transferAmount > 0.0)
+
+        assertMsg "transfer amount exceeds holding amount"
+          (transferAmount <= amount)
+
+        assertMsg "requestedAt must not be in the future"
+          (requestedAt <= now)
+
+        assertMsg "executeBefore must be in the future"
+          (executeBefore > now)
+
+        transferInstructionCid <- create PCTokenTransferInstruction with
+          issuer
+          originalInstructionCid = None
+          transfer = Transfer with
+            sender = owner
+            receiver
+            amount = transferAmount
+            instrumentId
+            requestedAt
+            executeBefore
+            inputHoldingCids = [toInterfaceContractId self]
+            meta = extraArgs.meta
+          sourceAmount = amount
+          sourceLock = lock
+          sourceMeta = meta
+          instructionMeta = extraArgs.meta
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Pending with
+            transferInstructionCid = toInterfaceContractId transferInstructionCid
+          senderChangeCids = []
+          meta = extraArgs.meta
+
+    choice Burn : ()
+      controller owner
+      do
+        pure ()
+
+    choice BurnAmount : [ContractId PCToken]
+      with
+        burnAmount : Decimal
+      controller owner
+      do
+        assertMsg "burn amount must be positive"
+          (burnAmount > 0.0)
+
+        assertMsg "burn amount exceeds holding amount"
+          (burnAmount <= amount)
+
+        if burnAmount == amount then
+          pure []
+        else do
+          changeCid <- create this with
+            amount = amount - burnAmount
+          pure [changeCid]
+
+    interface instance Holding for PCToken where
+      view = HoldingView with
+        owner
+        instrumentId
+        amount
+        lock
+        meta
+
+template PCTokenTransferInstruction
+  with
+    issuer : Party
+    originalInstructionCid : Optional (ContractId TransferInstruction)
+    transfer : Transfer
+    sourceAmount : Decimal
+    sourceLock : Optional Lock
+    sourceMeta : Metadata
+    instructionMeta : Metadata
+  where
+    signatory issuer
+    observer transfer.sender, transfer.receiver
+
+    ensure
+      transfer.amount > 0.0
+      && sourceAmount >= transfer.amount
+      && transfer.instrumentId.admin == issuer
+
+    interface instance TransferInstruction for PCTokenTransferInstruction where
+      view = TransferInstructionView with
+        originalInstructionCid
+        transfer
+        status = TransferPendingReceiverAcceptance
+        meta = instructionMeta
+
+      transferInstruction_acceptImpl _ arg = do
+        receiverHoldingCid <- create PCToken with
+          issuer
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+          lock = sourceLock
+          meta = sourceMeta
+
+        senderChangeCids <-
+          if sourceAmount == transfer.amount then
+            pure []
+          else do
+            senderChangeCid <- create PCToken with
+              issuer
+              owner = transfer.sender
+              instrumentId = transfer.instrumentId
+              amount = sourceAmount - transfer.amount
+              lock = sourceLock
+              meta = sourceMeta
+            pure [toInterfaceContractId senderChangeCid]
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with
+            receiverHoldingCids = [toInterfaceContractId receiverHoldingCid]
+          senderChangeCids
+          meta = arg.extraArgs.meta
+
+      transferInstruction_rejectImpl _ arg = do
+        senderHoldingCid <- create PCToken with
+          issuer
+          owner = transfer.sender
+          instrumentId = transfer.instrumentId
+          amount = sourceAmount
+          lock = sourceLock
+          meta = sourceMeta
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Failed
+          senderChangeCids = [toInterfaceContractId senderHoldingCid]
+          meta = arg.extraArgs.meta
+
+      transferInstruction_withdrawImpl _ arg = do
+        senderHoldingCid <- create PCToken with
+          issuer
+          owner = transfer.sender
+          instrumentId = transfer.instrumentId
+          amount = sourceAmount
+          lock = sourceLock
+          meta = sourceMeta
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Failed
+          senderChangeCids = [toInterfaceContractId senderHoldingCid]
+          meta = arg.extraArgs.meta
+
+      transferInstruction_updateImpl transferInstructionCid arg = do
+        assertMsg "no registry-internal transfer updates are supported"
+          (arg.extraActors == [])
+
+        nextTransferInstructionCid <- create this with
+          originalInstructionCid =
+            case originalInstructionCid of
+              None -> Some transferInstructionCid
+              Some cid -> Some cid
+          instructionMeta = arg.extraArgs.meta
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Pending with
+            transferInstructionCid = toInterfaceContractId nextTransferInstructionCid
+          senderChangeCids = []
+          meta = arg.extraArgs.meta

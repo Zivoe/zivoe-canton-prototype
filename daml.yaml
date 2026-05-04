@@ -2,6 +2,8 @@ sdk-version: 3.4.11
 name: zivoe-canton-prototype
 source: .
 version: 0.0.1
+build-options:
+  - -Wno-upgrade-interfaces
 dependencies:
   - daml-prim
   - daml-stdlib

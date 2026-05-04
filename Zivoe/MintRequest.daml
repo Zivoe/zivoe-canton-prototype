@@ -1,0 +1,138 @@
+module Zivoe.MintRequest where
+
+import Cip56.AllocationV1
+import Cip56.MetadataV1
+import Zivoe.PCToken
+import Cip56.TransferInstructionV1
+import Zivoe.Types
+
+template MintRequest
+  with
+    config : TokenConfig
+    user : Party
+    usdcxAmount : Decimal
+    quotedPrice : Price
+    minTokensOut : Decimal
+    automationOperators : [Party]
+  where
+    signatory user
+    observer config.issuer, config.treasury, automationOperators
+
+    ensure
+      usdcxAmount > 0.0
+      && minTokensOut > 0.0
+      && quotedPrice.value > 0.0
+      && quotedPrice.currency == config.paymentToken.symbol
+
+    choice CancelMintRequest : ()
+      controller user
+      do
+        pure ()
+
+    choice RejectMintRequest : ()
+      controller config.issuer
+      do
+        pure ()
+
+    choice AcceptMintRequest : ()
+      controller config.issuer
+      do
+        let tokensOut = usdcxAmount / quotedPrice.value
+
+        assertMsg "slippage check failed"
+          (tokensOut >= minTokensOut)
+
+        -- TODO CIP-56:
+        -- 1. Transfer USDCx from user to config.treasury.
+        -- 2. Mint NAV token to user.
+        --
+        -- This is where the Canton Token Standard APIs will be called.
+
+        pure ()
+
+    choice AcceptMintRequestWithUsdcxTransfer : ContractId PCToken
+      with
+        usdcxTransferInstructionCid : ContractId TransferInstruction
+        extraArgs : ExtraArgs
+      controller config.issuer, config.treasury
+      do
+        let tokensOut = usdcxAmount / quotedPrice.value
+
+        assertMsg "slippage check failed"
+          (tokensOut >= minTokensOut)
+
+        usdcxTransferInstruction <- fetch usdcxTransferInstructionCid
+        let transfer = (view usdcxTransferInstruction).transfer
+
+        assertMsg "USDCx transfer sender mismatch"
+          (transfer.sender == user)
+
+        assertMsg "USDCx transfer receiver mismatch"
+          (transfer.receiver == config.treasury)
+
+        assertMsg "USDCx transfer amount mismatch"
+          (transfer.amount == usdcxAmount)
+
+        assertMsg "USDCx transfer instrument mismatch"
+          (transfer.instrumentId == tokenRefToInstrumentId config.paymentToken)
+
+        transferResult <- exercise usdcxTransferInstructionCid TransferInstruction_Accept with
+          extraArgs
+
+        case transferResult.output of
+          TransferInstructionResult_Completed with receiverHoldingCids -> do
+            assertMsg "USDCx transfer produced no treasury holding"
+              (not (null receiverHoldingCids))
+          _ -> abort "USDCx transfer did not complete"
+
+        create PCToken with
+          issuer = config.issuer
+          owner = user
+          instrumentId = tokenRefToInstrumentId config.navToken
+          amount = tokensOut
+          lock = None
+          meta = emptyMetadata
+
+    choice AcceptMintRequestWithUsdcxAllocation : ContractId PCToken
+      with
+        usdcxAllocationCid : ContractId Allocation
+        extraArgs : ExtraArgs
+      controller config.issuer, config.treasury, user
+      do
+        let tokensOut = usdcxAmount / quotedPrice.value
+
+        assertMsg "slippage check failed"
+          (tokensOut >= minTokensOut)
+
+        usdcxAllocation <- fetch usdcxAllocationCid
+        let allocation = (view usdcxAllocation).allocation
+        let transferLeg = allocation.transferLeg
+
+        assertMsg "USDCx allocation sender mismatch"
+          (transferLeg.sender == user)
+
+        assertMsg "USDCx allocation receiver mismatch"
+          (transferLeg.receiver == config.treasury)
+
+        assertMsg "USDCx allocation executor mismatch"
+          (allocation.settlement.executor == config.issuer)
+
+        assertMsg "USDCx allocation amount mismatch"
+          (transferLeg.amount == usdcxAmount)
+
+        assertMsg "USDCx allocation instrument mismatch"
+          (transferLeg.instrumentId == tokenRefToInstrumentId config.paymentToken)
+
+        allocationResult <- exercise usdcxAllocationCid Allocation_ExecuteTransfer with
+          extraArgs
+
+        assertMsg "USDCx allocation produced no treasury holding"
+          (not (null allocationResult.receiverHoldingCids))
+
+        create PCToken with
+          issuer = config.issuer
+          owner = user
+          instrumentId = tokenRefToInstrumentId config.navToken
+          amount = tokensOut
+          lock = None
+          meta = emptyMetadata

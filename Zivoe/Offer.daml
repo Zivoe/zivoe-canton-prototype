@@ -1,8 +1,8 @@
-module NavToken.Offer where
+module Zivoe.Offer where
 
-import NavToken.Types
-import NavToken.MintRequest
-import NavToken.BurnRequest
+import Zivoe.Types
+import Zivoe.MintRequest
+import Zivoe.BurnRequest
 
 template TokenOffer
   with

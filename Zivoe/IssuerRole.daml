@@ -1,9 +1,9 @@
-module NavToken.IssuerRole where
+module Zivoe.IssuerRole where
 
-import NavToken.Types
-import NavToken.MintRequest
-import NavToken.BurnRequest
-import NavToken.Offer
+import Zivoe.Types
+import Zivoe.MintRequest
+import Zivoe.BurnRequest
+import Zivoe.Offer
 
 template IssuerRole
   with

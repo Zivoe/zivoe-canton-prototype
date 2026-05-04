@@ -1,0 +1,98 @@
+module Zivoe.Treasury where
+
+import Zivoe.Types
+import Zivoe.MintRequest
+import Zivoe.BurnRequest
+
+template TreasuryAccount
+  with
+    config : TokenConfig
+  where
+    signatory config.treasury
+    observer config.issuer, config.treasuryAdmin
+
+    nonconsuming choice DepositFromMint : ContractId TreasuryMovement
+      with
+        mintRequestCid : ContractId MintRequest
+      controller config.issuer, config.treasury
+      do
+        req <- fetch mintRequestCid
+
+        assertMsg "mint request config mismatch"
+          (req.config == config)
+
+        exercise mintRequestCid AcceptMintRequest
+
+        now <- getTime
+
+        create TreasuryMovement with
+          config
+          movementType = "MintDeposit"
+          token = config.paymentToken
+          amount = req.usdcxAmount
+          user = Some req.user
+          price = Some req.quotedPrice
+          reason = "USDCx collected for NAV mint"
+          recordedAt = now
+
+    nonconsuming choice ReturnForBurn : ContractId TreasuryMovement
+      with
+        burnRequestCid : ContractId BurnRequest
+      controller config.issuer, config.treasury
+      do
+        req <- fetch burnRequestCid
+
+        assertMsg "burn request config mismatch"
+          (req.config == config)
+
+        let usdcxOut = req.tokenAmount * req.quotedPrice.value
+
+        exercise burnRequestCid AcceptBurnRequest
+
+        now <- getTime
+
+        create TreasuryMovement with
+          config
+          movementType = "BurnReturn"
+          token = config.paymentToken
+          amount = usdcxOut
+          user = Some req.user
+          price = Some req.quotedPrice
+          reason = "USDCx returned for NAV burn"
+          recordedAt = now
+
+    nonconsuming choice PullForOffchainTokenization : ContractId TreasuryMovement
+      with
+        action : TreasuryAction
+      controller config.treasuryAdmin, config.treasury
+      do
+        assertMsg "amount must be positive"
+          (action.amount > 0.0)
+
+        now <- getTime
+
+        create TreasuryMovement with
+          config
+          movementType = "OffchainTokenizationPull"
+          token = config.paymentToken
+          amount = action.amount
+          user = None
+          price = None
+          reason = action.reason
+          recordedAt = now
+
+template TreasuryMovement
+  with
+    config : TokenConfig
+    movementType : Text
+    token : TokenRef
+    amount : Decimal
+    user : Optional Party
+    price : Optional Price
+    reason : Text
+    recordedAt : Time
+  where
+    signatory config.treasury
+    observer config.issuer, config.treasuryAdmin
+
+    ensure amount > 0.0
