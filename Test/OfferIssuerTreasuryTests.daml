@@ -1,0 +1,113 @@
+module Test.OfferIssuerTreasuryTests where
+
+import Daml.Script
+
+import Test.Util
+import Zivoe.IssuerRole
+import Zivoe.Offer
+import Zivoe.Treasury
+import Zivoe.Types
+
+createIssuerRole : TestContext -> Script (ContractId IssuerRole)
+createIssuerRole ctx =
+  submit ctx.issuer do
+    createCmd IssuerRole with
+      config = ctx.config
+      currentPrice = ctx.price
+      automation = ctx.automation
+
+createOffer : TestContext -> Script (ContractId TokenOffer)
+createOffer ctx = script do
+  issuerRoleCid <- createIssuerRole ctx
+  submit ctx.issuer do
+    exerciseCmd issuerRoleCid CreateOffer with
+      user = ctx.alice
+
+offerCreatesRequestsTest : Script ()
+offerCreatesRequestsTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+
+  mintReqCid <- submit ctx.alice do
+    exerciseCmd offerCid RequestMint with
+      usdcxAmount = 1050.0
+      minTokensOut = 999.0
+
+  mintReq <- queryContractId ctx.alice mintReqCid >>= expectSome "expected mint request"
+  assertMsg "mint request amount mismatch" (mintReq.usdcxAmount == 1050.0)
+
+  burnReqCid <- submit ctx.alice do
+    exerciseCmd offerCid RequestBurn with
+      tokenAmount = 500.0
+      minUsdcxOut = 524.0
+
+  burnReq <- queryContractId ctx.alice burnReqCid >>= expectSome "expected burn request"
+  assertMsg "burn request amount mismatch" (burnReq.tokenAmount == 500.0)
+
+offerRejectsBadSlippageTest : Script ()
+offerRejectsBadSlippageTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+
+  submitMustFail ctx.alice do
+    exerciseCmd offerCid RequestMint with
+      usdcxAmount = 1050.0
+      minTokensOut = 1001.0
+
+  submitMustFail ctx.alice do
+    exerciseCmd offerCid RequestBurn with
+      tokenAmount = 500.0
+      minUsdcxOut = 526.0
+
+issuerRoleValidationAndAutomationTest : Script ()
+issuerRoleValidationAndAutomationTest = script do
+  ctx <- setup ()
+  issuerRoleCid <- createIssuerRole ctx
+
+  submitMustFail ctx.issuer do
+    exerciseCmd issuerRoleCid UpdatePrice with
+      newPrice = ctx.price with
+        currency = "USD"
+
+  submitMustFail ctx.issuer do
+    exerciseCmd issuerRoleCid UpdatePrice with
+      newPrice = ctx.price with
+        value = 0.0
+
+  offerCid <- submit ctx.issuer do
+    exerciseCmd issuerRoleCid CreateOffer with
+      user = ctx.alice
+
+  autoMintReqCid <- submit ctx.alice do
+    exerciseCmd offerCid RequestMint with
+      usdcxAmount = 1050.0
+      minTokensOut = 999.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.bob]) do
+    exerciseCmd issuerRoleCid AutoAcceptMintRequest with
+      mintRequestCid = autoMintReqCid
+      operator = ctx.bob
+
+treasuryMovementTest : Script ()
+treasuryMovementTest = script do
+  ctx <- setup ()
+
+  treasuryCid <- submit ctx.treasury do
+    createCmd TreasuryAccount with
+      config = ctx.config
+
+  movementCid <- submit (actAs [ctx.treasuryAdmin, ctx.treasury]) do
+    exerciseCmd treasuryCid PullForOffchainTokenization with
+      action = TreasuryAction with
+        amount = 100.0
+        reason = "test pull"
+
+  movement <- queryContractId ctx.treasury movementCid >>= expectSome "expected treasury movement"
+  assertMsg "treasury movement amount mismatch" (movement.amount == 100.0)
+  assertMsg "treasury movement reason mismatch" (movement.reason == "test pull")
+
+  submitMustFail (actAs [ctx.treasuryAdmin, ctx.treasury]) do
+    exerciseCmd treasuryCid PullForOffchainTokenization with
+      action = TreasuryAction with
+        amount = 0.0
+        reason = "invalid pull"

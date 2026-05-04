@@ -1,0 +1,82 @@
+module Test.MockAllocation where
+
+import Cip56.AllocationV1
+import Cip56.HoldingV1
+import Cip56.MetadataV1
+import Zivoe.PCToken
+
+template MockAllocation
+  with
+    issuer : Party
+    allocation : AllocationSpecification
+    sourceAmount : Decimal
+    sourceLock : Optional Lock
+    sourceMeta : Metadata
+    allocationMeta : Metadata
+  where
+    signatory allocation.transferLeg.sender
+    observer allocation.transferLeg.receiver, allocation.settlement.executor
+
+    ensure
+      allocation.transferLeg.amount > 0.0
+      && sourceAmount >= allocation.transferLeg.amount
+      && allocation.transferLeg.instrumentId.admin == issuer
+
+    interface instance Allocation for MockAllocation where
+      view = AllocationView with
+        allocation
+        holdingCids = []
+        meta = allocationMeta
+
+      allocation_executeTransferImpl _ arg = do
+        receiverHoldingCid <- create PCToken with
+          issuer
+          owner = allocation.transferLeg.receiver
+          instrumentId = allocation.transferLeg.instrumentId
+          amount = allocation.transferLeg.amount
+          lock = sourceLock
+          meta = sourceMeta
+
+        senderHoldingCids <-
+          if sourceAmount == allocation.transferLeg.amount then
+            pure []
+          else do
+            senderChangeCid <- create PCToken with
+              issuer
+              owner = allocation.transferLeg.sender
+              instrumentId = allocation.transferLeg.instrumentId
+              amount = sourceAmount - allocation.transferLeg.amount
+              lock = sourceLock
+              meta = sourceMeta
+            pure [toInterfaceContractId senderChangeCid]
+
+        pure Allocation_ExecuteTransferResult with
+          senderHoldingCids
+          receiverHoldingCids = [toInterfaceContractId receiverHoldingCid]
+          meta = arg.extraArgs.meta
+
+      allocation_cancelImpl _ arg = do
+        senderHoldingCid <- create PCToken with
+          issuer
+          owner = allocation.transferLeg.sender
+          instrumentId = allocation.transferLeg.instrumentId
+          amount = sourceAmount
+          lock = sourceLock
+          meta = sourceMeta
+
+        pure Allocation_CancelResult with
+          senderHoldingCids = [toInterfaceContractId senderHoldingCid]
+          meta = arg.extraArgs.meta
+
+      allocation_withdrawImpl _ arg = do
+        senderHoldingCid <- create PCToken with
+          issuer
+          owner = allocation.transferLeg.sender
+          instrumentId = allocation.transferLeg.instrumentId
+          amount = sourceAmount
+          lock = sourceLock
+          meta = sourceMeta
+
+        pure Allocation_WithdrawResult with
+          senderHoldingCids = [toInterfaceContractId senderHoldingCid]
+          meta = arg.extraArgs.meta

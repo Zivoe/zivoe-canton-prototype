@@ -1,0 +1,145 @@
+module Test.PCTokenTests where
+
+import Daml.Script
+import DA.Time (addRelTime, seconds)
+
+import Cip56.TransferInstructionV1
+import Test.Util
+import Zivoe.PCToken
+
+pcTokenSplitAndBurnTest : Script ()
+pcTokenSplitAndBurnTest = script do
+  ctx <- setup ()
+  tokenCid <- createPcToken ctx ctx.alice 1000.0
+
+  (splitCid, remainderCid) <- submit ctx.alice do
+    exerciseCmd tokenCid Split with
+      splitAmount = 250.0
+
+  split <- queryContractId ctx.issuer splitCid >>= expectSome "expected split holding"
+  remainder <- queryContractId ctx.issuer remainderCid >>= expectSome "expected remainder holding"
+
+  assertMsg "split amount mismatch" (split.amount == 250.0)
+  assertMsg "remainder amount mismatch" (remainder.amount == 750.0)
+
+  changeCids <- submit ctx.alice do
+    exerciseCmd remainderCid BurnAmount with
+      burnAmount = 300.0
+
+  case changeCids of
+    [changeCid] -> do
+      change <- queryContractId ctx.issuer changeCid >>= expectSome "expected burn change holding"
+      assertMsg "burn change amount mismatch" (change.amount == 450.0)
+    _ -> abort "expected one burn change holding"
+
+pcTokenRejectsInvalidAmountsTest : Script ()
+pcTokenRejectsInvalidAmountsTest = script do
+  ctx <- setup ()
+  tokenCid <- createPcToken ctx ctx.alice 100.0
+
+  submitMustFail ctx.alice do
+    exerciseCmd tokenCid Split with
+      splitAmount = 0.0
+
+  submitMustFail ctx.alice do
+    exerciseCmd tokenCid Split with
+      splitAmount = 100.0
+
+  submitMustFail ctx.alice do
+    exerciseCmd tokenCid BurnAmount with
+      burnAmount = 101.0
+
+pcTokenFullBurnTest : Script ()
+pcTokenFullBurnTest = script do
+  ctx <- setup ()
+  tokenCid <- createPcToken ctx ctx.alice 100.0
+
+  changeCids <- submit ctx.alice do
+    exerciseCmd tokenCid BurnAmount with
+      burnAmount = 100.0
+
+  assertMsg "full burn should not create change" (null changeCids)
+
+  consumed <- queryContractId ctx.issuer tokenCid
+  expectNone "expected fully burned holding to be archived" consumed
+
+pcTokenTransferAcceptRejectWithdrawTest : Script ()
+pcTokenTransferAcceptRejectWithdrawTest = script do
+  ctx <- setup ()
+
+  acceptTokenCid <- createPcToken ctx ctx.alice 100.0
+  acceptResult <- instructTransfer ctx.alice acceptTokenCid ctx.bob 40.0
+  acceptInstructionCid <- expectPendingTransfer acceptResult
+
+  completed <- submit ctx.bob do
+    exerciseCmd acceptInstructionCid TransferInstruction_Accept with
+      extraArgs = defaultExtraArgs
+
+  case completed.output of
+    TransferInstructionResult_Completed with receiverHoldingCids ->
+      assertMsg "expected receiver holding" (not (null receiverHoldingCids))
+    _ -> abort "expected completed transfer"
+
+  rejectTokenCid <- createPcToken ctx ctx.alice 100.0
+  rejectResult <- instructTransfer ctx.alice rejectTokenCid ctx.bob 40.0
+  rejectInstructionCid <- expectPendingTransfer rejectResult
+
+  rejected <- submit ctx.bob do
+    exerciseCmd rejectInstructionCid TransferInstruction_Reject with
+      extraArgs = defaultExtraArgs
+
+  case rejected.output of
+    TransferInstructionResult_Failed ->
+      assertMsg "expected sender returned holding" (not (null rejected.senderChangeCids))
+    _ -> abort "expected failed transfer"
+
+  withdrawTokenCid <- createPcToken ctx ctx.alice 100.0
+  withdrawResult <- instructTransfer ctx.alice withdrawTokenCid ctx.bob 40.0
+  withdrawInstructionCid <- expectPendingTransfer withdrawResult
+
+  withdrawn <- submit ctx.alice do
+    exerciseCmd withdrawInstructionCid TransferInstruction_Withdraw with
+      extraArgs = defaultExtraArgs
+
+  case withdrawn.output of
+    TransferInstructionResult_Failed ->
+      assertMsg "expected withdrawn sender holding" (not (null withdrawn.senderChangeCids))
+    _ -> abort "expected withdrawn transfer"
+
+pcTokenTransferValidationTest : Script ()
+pcTokenTransferValidationTest = script do
+  ctx <- setup ()
+  tokenCid <- createPcToken ctx ctx.alice 100.0
+  now <- getTime
+
+  submitMustFail ctx.alice do
+    exerciseCmd tokenCid InstructTransfer with
+      receiver = ctx.alice
+      transferAmount = 10.0
+      requestedAt = now
+      executeBefore = addRelTime now (seconds 60)
+      extraArgs = defaultExtraArgs
+
+  submitMustFail ctx.alice do
+    exerciseCmd tokenCid InstructTransfer with
+      receiver = ctx.bob
+      transferAmount = 101.0
+      requestedAt = now
+      executeBefore = addRelTime now (seconds 60)
+      extraArgs = defaultExtraArgs
+
+  submitMustFail ctx.alice do
+    exerciseCmd tokenCid InstructTransfer with
+      receiver = ctx.bob
+      transferAmount = 10.0
+      requestedAt = addRelTime now (seconds 60)
+      executeBefore = addRelTime now (seconds 120)
+      extraArgs = defaultExtraArgs
+
+  submitMustFail ctx.alice do
+    exerciseCmd tokenCid InstructTransfer with
+      receiver = ctx.bob
+      transferAmount = 10.0
+      requestedAt = now
+      executeBefore = now
+      extraArgs = defaultExtraArgs

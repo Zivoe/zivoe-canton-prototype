@@ -1,0 +1,170 @@
+module Test.Util where
+
+import Daml.Script
+import DA.Time (addRelTime, seconds)
+
+import Cip56.AllocationV1
+import Cip56.MetadataV1
+import Cip56.TransferInstructionV1
+import Test.MockAllocation
+import Zivoe.PCToken
+import Zivoe.Types
+
+data TestContext = TestContext
+  with
+    issuer : Party
+    treasury : Party
+    treasuryAdmin : Party
+    alice : Party
+    bob : Party
+    operator : Party
+    usdcxRef : TokenRef
+    navRef : TokenRef
+    price : Price
+    config : TokenConfig
+    automation : AutomationPolicy
+
+setup : () -> Script TestContext
+setup () = script do
+  issuer <- allocateParty "Issuer"
+  treasury <- allocateParty "Treasury"
+  treasuryAdmin <- allocateParty "TreasuryAdmin"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  operator <- allocateParty "Operator"
+
+  let usdcxRef = TokenRef with
+        registry = issuer
+        symbol = "USDCx"
+        instrumentId = "USDCx-001"
+
+  let navRef = TokenRef with
+        registry = issuer
+        symbol = "NAV"
+        instrumentId = "NAV-001"
+
+  now <- getTime
+
+  let price = Price with
+        value = 1.0500
+        currency = "USDCx"
+        effectiveAt = now
+        priceId = "price-001"
+
+  let config = TokenConfig with
+        issuer
+        treasury
+        treasuryAdmin
+        navToken = navRef
+        paymentToken = usdcxRef
+
+  let automation = AutomationPolicy with
+        enabled = True
+        maxMintUsdcx = 10000.0
+        maxBurnTokens = 10000.0
+        operators = [operator]
+
+  pure TestContext with
+    issuer
+    treasury
+    treasuryAdmin
+    alice
+    bob
+    operator
+    usdcxRef
+    navRef
+    price
+    config
+    automation
+
+defaultExtraArgs : ExtraArgs
+defaultExtraArgs = ExtraArgs with
+  context = emptyChoiceContext
+  meta = emptyMetadata
+
+createPcToken : TestContext -> Party -> Decimal -> Script (ContractId PCToken)
+createPcToken ctx owner amount =
+  submit ctx.issuer do
+    createCmd PCToken with
+      issuer = ctx.issuer
+      owner
+      instrumentId = tokenRefToInstrumentId ctx.navRef
+      amount
+      lock = None
+      meta = emptyMetadata
+
+createUsdcxToken : TestContext -> Party -> Decimal -> Script (ContractId PCToken)
+createUsdcxToken ctx owner amount =
+  submit ctx.issuer do
+    createCmd PCToken with
+      issuer = ctx.issuer
+      owner
+      instrumentId = tokenRefToInstrumentId ctx.usdcxRef
+      amount
+      lock = None
+      meta = emptyMetadata
+
+createUsdcxAllocation : TestContext -> Party -> Party -> Decimal -> Script (ContractId Allocation)
+createUsdcxAllocation ctx sender receiver amount = script do
+  now <- getTime
+
+  let settlement = SettlementInfo with
+        executor = ctx.issuer
+        settlementRef = Reference with
+          id = "test-settlement"
+          cid = None
+        requestedAt = now
+        allocateBefore = addRelTime now (seconds 60)
+        settleBefore = addRelTime now (seconds 120)
+        meta = emptyMetadata
+
+  let transferLeg = TransferLeg with
+        sender
+        receiver
+        amount
+        instrumentId = tokenRefToInstrumentId ctx.usdcxRef
+        meta = emptyMetadata
+
+  allocationCid <- submit sender do
+    createCmd MockAllocation with
+      issuer = ctx.issuer
+      allocation = AllocationSpecification with
+        settlement
+        transferLegId = "usdcx-leg"
+        transferLeg
+      sourceAmount = amount
+      sourceLock = None
+      sourceMeta = emptyMetadata
+      allocationMeta = emptyMetadata
+
+  pure (toInterfaceContractId allocationCid)
+
+instructTransfer : Party -> ContractId PCToken -> Party -> Decimal -> Script TransferInstructionResult
+instructTransfer sender holdingCid receiver amount = script do
+  now <- getTime
+  submit sender do
+    exerciseCmd holdingCid InstructTransfer with
+      receiver
+      transferAmount = amount
+      requestedAt = now
+      executeBefore = addRelTime now (seconds 60)
+      extraArgs = defaultExtraArgs
+
+expectPendingTransfer : TransferInstructionResult -> Script (ContractId TransferInstruction)
+expectPendingTransfer result =
+  case result.output of
+    TransferInstructionResult_Pending with transferInstructionCid ->
+      pure transferInstructionCid
+    _ -> abort "expected pending transfer instruction"
+
+expectSome : Text -> Optional a -> Script a
+expectSome message value =
+  case value of
+    Some a -> pure a
+    None -> abort message
+
+expectNone : Text -> Optional a -> Script ()
+expectNone message value =
+  case value of
+    None -> pure ()
+    Some _ -> abort message

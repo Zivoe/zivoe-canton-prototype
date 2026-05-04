@@ -1,0 +1,195 @@
+module Test.MintBurnSettlementTests where
+
+import Daml.Script
+
+import Cip56.TransferInstructionV1
+import Test.OfferIssuerTreasuryTests (createOffer)
+import Test.Util
+import Zivoe.BurnRequest
+import Zivoe.MintRequest
+import Zivoe.Offer
+import Zivoe.PCToken
+
+createMintRequest : TestContext -> ContractId TokenOffer -> Script (ContractId MintRequest)
+createMintRequest ctx offerCid =
+  submit ctx.alice do
+    exerciseCmd offerCid RequestMint with
+      usdcxAmount = 1050.0
+      minTokensOut = 999.0
+
+createBurnRequest : TestContext -> ContractId TokenOffer -> Script (ContractId BurnRequest)
+createBurnRequest ctx offerCid =
+  submit ctx.alice do
+    exerciseCmd offerCid RequestBurn with
+      tokenAmount = 500.0
+      minUsdcxOut = 524.0
+
+createPendingUsdcxTransfer : TestContext -> Party -> Party -> Decimal -> Script (ContractId TransferInstruction)
+createPendingUsdcxTransfer ctx sender receiver amount = script do
+  usdcxCid <- createUsdcxToken ctx sender amount
+  result <- instructTransfer sender usdcxCid receiver amount
+  expectPendingTransfer result
+
+mintWithUsdcxTransferTest : Script ()
+mintWithUsdcxTransferTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  mintReqCid <- createMintRequest ctx offerCid
+  usdcxTransferInstructionCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.treasury 1050.0
+
+  mintedCid <- submit (actAs [ctx.issuer, ctx.treasury]) do
+    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+      usdcxTransferInstructionCid
+      extraArgs = defaultExtraArgs
+
+  minted <- queryContractId ctx.issuer mintedCid >>= expectSome "expected minted PCToken"
+  assertMsg "minted owner mismatch" (minted.owner == ctx.alice)
+  assertMsg "minted amount mismatch" (minted.amount == 1000.0)
+  assertMsg "minted instrument mismatch" (minted.instrumentId == tokenRefToInstrumentId ctx.navRef)
+
+mintRejectsWrongUsdcxTransferTest : Script ()
+mintRejectsWrongUsdcxTransferTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  mintReqCid <- createMintRequest ctx offerCid
+
+  wrongAmountTransferCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.treasury 1000.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.treasury]) do
+    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+      usdcxTransferInstructionCid = wrongAmountTransferCid
+      extraArgs = defaultExtraArgs
+
+  wrongReceiverTransferCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.bob 1050.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.treasury]) do
+    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+      usdcxTransferInstructionCid = wrongReceiverTransferCid
+      extraArgs = defaultExtraArgs
+
+mintWithUsdcxAllocationTest : Script ()
+mintWithUsdcxAllocationTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  mintReqCid <- createMintRequest ctx offerCid
+  usdcxAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.treasury 1050.0
+
+  mintedCid <- submit (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
+    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxAllocation with
+      usdcxAllocationCid
+      extraArgs = defaultExtraArgs
+
+  minted <- queryContractId ctx.issuer mintedCid >>= expectSome "expected allocation minted PCToken"
+  assertMsg "allocation mint owner mismatch" (minted.owner == ctx.alice)
+  assertMsg "allocation mint amount mismatch" (minted.amount == 1000.0)
+
+mintRejectsWrongUsdcxAllocationTest : Script ()
+mintRejectsWrongUsdcxAllocationTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  mintReqCid <- createMintRequest ctx offerCid
+
+  wrongReceiverAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.bob 1050.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
+    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxAllocation with
+      usdcxAllocationCid = wrongReceiverAllocationCid
+      extraArgs = defaultExtraArgs
+
+  wrongAmountAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.treasury 1000.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
+    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxAllocation with
+      usdcxAllocationCid = wrongAmountAllocationCid
+      extraArgs = defaultExtraArgs
+
+burnWithPCTokenAndUsdcxTransferTest : Script ()
+burnWithPCTokenAndUsdcxTransferTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  burnReqCid <- createBurnRequest ctx offerCid
+  pcTokenCid <- createPcToken ctx ctx.alice 1000.0
+  usdcxTransferInstructionCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 525.0
+
+  changeCids <- submit (actAs [ctx.issuer, ctx.alice]) do
+    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+      pcTokenCid
+      usdcxTransferInstructionCid
+      extraArgs = defaultExtraArgs
+
+  case changeCids of
+    [changeCid] -> do
+      change <- queryContractId ctx.issuer changeCid >>= expectSome "expected burn change"
+      assertMsg "burn change owner mismatch" (change.owner == ctx.alice)
+      assertMsg "burn change amount mismatch" (change.amount == 500.0)
+    _ -> abort "expected one PCToken change holding"
+
+  consumed <- queryContractId ctx.issuer pcTokenCid
+  expectNone "expected burned PCToken to be archived" consumed
+
+burnRejectsWrongPCTokenOrUsdcxTransferTest : Script ()
+burnRejectsWrongPCTokenOrUsdcxTransferTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  burnReqCid <- createBurnRequest ctx offerCid
+
+  wrongInstrumentCid <- createUsdcxToken ctx ctx.alice 1000.0
+  validUsdcxReturnCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 525.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.alice]) do
+    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+      pcTokenCid = wrongInstrumentCid
+      usdcxTransferInstructionCid = validUsdcxReturnCid
+      extraArgs = defaultExtraArgs
+
+  pcTokenCid <- createPcToken ctx ctx.alice 1000.0
+  wrongAmountUsdcxReturnCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 500.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.alice]) do
+    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+      pcTokenCid
+      usdcxTransferInstructionCid = wrongAmountUsdcxReturnCid
+      extraArgs = defaultExtraArgs
+
+burnWithPCTokenAndUsdcxAllocationTest : Script ()
+burnWithPCTokenAndUsdcxAllocationTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  burnReqCid <- createBurnRequest ctx offerCid
+  pcTokenCid <- createPcToken ctx ctx.alice 1000.0
+  usdcxAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.alice 525.0
+
+  changeCids <- submit (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
+    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxAllocation with
+      pcTokenCid
+      usdcxAllocationCid
+      extraArgs = defaultExtraArgs
+
+  case changeCids of
+    [changeCid] -> do
+      change <- queryContractId ctx.issuer changeCid >>= expectSome "expected allocation burn change"
+      assertMsg "allocation burn change mismatch" (change.owner == ctx.alice && change.amount == 500.0)
+    _ -> abort "expected one allocation burn change holding"
+
+burnRejectsWrongUsdcxAllocationTest : Script ()
+burnRejectsWrongUsdcxAllocationTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+  burnReqCid <- createBurnRequest ctx offerCid
+  pcTokenCid <- createPcToken ctx ctx.alice 1000.0
+
+  wrongReceiverAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.bob 525.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
+    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxAllocation with
+      pcTokenCid
+      usdcxAllocationCid = wrongReceiverAllocationCid
+      extraArgs = defaultExtraArgs
+
+  wrongAmountAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.alice 500.0
+
+  submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
+    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxAllocation with
+      pcTokenCid
+      usdcxAllocationCid = wrongAmountAllocationCid
+      extraArgs = defaultExtraArgs
