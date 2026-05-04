@@ -1,0 +1,198 @@
+module Test.Test where
+
+import Daml.Script
+import DA.Time (addRelTime, seconds)
+
+import Zivoe.Types
+import Cip56.MetadataV1
+import Zivoe.BurnRequest
+import Zivoe.IssuerRole
+import Zivoe.MintRequest
+import Zivoe.Offer
+import Zivoe.PCToken
+import Zivoe.Treasury
+import Cip56.TransferInstructionV1
+
+testSetup : Script ()
+testSetup = script do
+  issuer <- allocateParty "Issuer"
+  treasury <- allocateParty "Treasury"
+  treasuryAdmin <- allocateParty "TreasuryAdmin"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  operator <- allocateParty "Operator"
+
+  let usdcxRef = TokenRef with
+        registry = issuer
+        symbol = "USDCx"
+        instrumentId = "USDCx-001"
+
+  let navRef = TokenRef with
+        registry = issuer
+        symbol = "NAV"
+        instrumentId = "NAV-001"
+
+  now <- getTime
+
+  let price = Price with
+        value = 1.0000
+        currency = "USDCx"
+        effectiveAt = now
+        priceId = "price-001"
+
+  let config = TokenConfig with
+        issuer = issuer
+        treasury = treasury
+        treasuryAdmin = treasuryAdmin
+        navToken = navRef
+        paymentToken = usdcxRef
+
+  pcTokenCid <- submit issuer do
+    createCmd PCToken with
+      issuer = issuer
+      owner = alice
+      instrumentId = tokenRefToInstrumentId navRef
+      amount = 1000.0
+      lock = None
+      meta = emptyMetadata
+
+  (_, aliceRemainderCid) <- submit alice do
+    exerciseCmd pcTokenCid Split with
+      splitAmount = 250.0
+
+  transferInstructionResult <- submit alice do
+    exerciseCmd aliceRemainderCid InstructTransfer with
+      receiver = bob
+      transferAmount = 100.0
+      requestedAt = now
+      executeBefore = addRelTime now (seconds 60)
+      extraArgs = ExtraArgs with
+        context = emptyChoiceContext
+        meta = emptyMetadata
+
+  case transferInstructionResult.output of
+    TransferInstructionResult_Pending with transferInstructionCid -> do
+      submit bob do
+        exerciseCmd transferInstructionCid TransferInstruction_Accept with
+          extraArgs = ExtraArgs with
+            context = emptyChoiceContext
+            meta = emptyMetadata
+    _ -> abort "expected pending transfer instruction"
+
+  let automation = AutomationPolicy with
+        enabled = True
+        maxMintUsdcx = 10000.0
+        maxBurnTokens = 10000.0
+        operators = [operator]
+
+  issuerRoleCid <- submit issuer do
+    createCmd IssuerRole with
+      config = config
+      currentPrice = price
+      automation = automation
+
+  treasuryCid <- submit treasury do
+    createCmd TreasuryAccount with
+      config = config
+
+  -- Issuer updates NAV / price
+  now2 <- getTime
+
+  let newPrice = Price with
+        value = 1.0500
+        currency = "USDCx"
+        effectiveAt = now2
+        priceId = "price-002"
+
+  issuerRoleCid2 <- submit issuer do
+    exerciseCmd issuerRoleCid UpdatePrice with
+      newPrice = newPrice
+
+  offerCid <- submit issuer do
+    exerciseCmd issuerRoleCid2 CreateOffer with
+      user = alice
+
+  -- Alice requests mint:
+  -- 1,050 USDCx at price 1.05 = 1,000 NAV tokens
+  mintReqCid <- submit alice do
+    exerciseCmd offerCid RequestMint with
+      usdcxAmount = 1050.0
+      minTokensOut = 999.0
+
+  -- In the prototype, PCToken is also used as a local stand-in for an existing
+  -- USDCx holding implementing the CIP-56 Holding/TransferInstruction APIs.
+  aliceUsdcxCid <- submit issuer do
+    createCmd PCToken with
+      issuer = issuer
+      owner = alice
+      instrumentId = tokenRefToInstrumentId usdcxRef
+      amount = 2000.0
+      lock = None
+      meta = emptyMetadata
+
+  usdcxToTreasuryResult <- submit alice do
+    exerciseCmd aliceUsdcxCid InstructTransfer with
+      receiver = treasury
+      transferAmount = 1050.0
+      requestedAt = now2
+      executeBefore = addRelTime now2 (seconds 60)
+      extraArgs = ExtraArgs with
+        context = emptyChoiceContext
+        meta = emptyMetadata
+
+  mintedPcTokenCid <- case usdcxToTreasuryResult.output of
+    TransferInstructionResult_Pending with transferInstructionCid -> do
+      submitMulti [issuer, treasury] [] do
+        exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+          usdcxTransferInstructionCid = transferInstructionCid
+          extraArgs = ExtraArgs with
+            context = emptyChoiceContext
+            meta = emptyMetadata
+    _ -> abort "expected pending USDCx transfer instruction"
+
+  -- Treasury admin pulls USDCx for off-chain tokenization handling.
+  submitMulti [treasuryAdmin, treasury] [] do
+    exerciseCmd treasuryCid PullForOffchainTokenization with
+      action = TreasuryAction with
+        amount = 100.0
+        reason = "off-chain tokenization funding"
+
+  -- Alice requests burn:
+  -- 500 NAV at price 1.05 = 525 USDCx
+  burnReqCid <- submit alice do
+    exerciseCmd offerCid RequestBurn with
+      tokenAmount = 500.0
+      minUsdcxOut = 524.0
+
+  treasuryUsdcxCid <- submit issuer do
+    createCmd PCToken with
+      issuer = issuer
+      owner = treasury
+      instrumentId = tokenRefToInstrumentId usdcxRef
+      amount = 525.0
+      lock = None
+      meta = emptyMetadata
+
+  usdcxToAliceResult <- submit treasury do
+    exerciseCmd treasuryUsdcxCid InstructTransfer with
+      receiver = alice
+      transferAmount = 525.0
+      requestedAt = now2
+      executeBefore = addRelTime now2 (seconds 60)
+      extraArgs = ExtraArgs with
+        context = emptyChoiceContext
+        meta = emptyMetadata
+
+  -- Alice burns actual PCToken and accepts the USDCx transfer back.
+  case usdcxToAliceResult.output of
+    TransferInstructionResult_Pending with transferInstructionCid -> do
+      submitMulti [issuer, alice] [] do
+        exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+          pcTokenCid = mintedPcTokenCid
+          usdcxTransferInstructionCid = transferInstructionCid
+          extraArgs = ExtraArgs with
+            context = emptyChoiceContext
+            meta = emptyMetadata
+    _ -> abort "expected pending USDCx return transfer instruction"
+
+  return ()

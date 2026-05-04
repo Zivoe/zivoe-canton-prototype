@@ -1,4 +1,4 @@
-module NavToken.Types where
+module Zivoe.Types where
 
 data TokenRef = TokenRef
   with
