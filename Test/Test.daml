@@ -3,6 +3,7 @@ module Test.Test where
 import Daml.Script
 import DA.Time (addRelTime, seconds)
 
+import Test.Util (expectSome, requestExtraArgs)
 import Zivoe.Types
 import Cip56.MetadataV1
 import Zivoe.BurnRequest
@@ -20,7 +21,6 @@ testSetup = script do
   treasuryAdmin <- allocateParty "TreasuryAdmin"
   alice <- allocateParty "Alice"
   bob <- allocateParty "Bob"
-  operator <- allocateParty "Operator"
 
   let usdcxRef = TokenRef with
         registry = issuer
@@ -79,17 +79,10 @@ testSetup = script do
             meta = emptyMetadata
     _ -> abort "expected pending transfer instruction"
 
-  let automation = AutomationPolicy with
-        enabled = True
-        maxMintUsdcx = 10000.0
-        maxBurnTokens = 10000.0
-        operators = [operator]
-
   issuerRoleCid <- submit issuer do
     createCmd IssuerRole with
       config = config
-      currentPrice = price
-      automation = automation
+      navPrice = price
 
   treasuryCid <- submit treasury do
     createCmd TreasuryAccount with
@@ -118,6 +111,8 @@ testSetup = script do
     exerciseCmd offerCid RequestMint with
       usdcxAmount = 1050.0
       minTokensOut = 999.0
+      requestNonce = "scenario-mint"
+  mintReq <- queryContractId alice mintReqCid >>= expectSome "expected mint request"
 
   -- In the prototype, PCToken is also used as a local stand-in for an existing
   -- USDCx holding implementing the CIP-56 Holding/TransferInstruction APIs.
@@ -136,14 +131,12 @@ testSetup = script do
       transferAmount = 1050.0
       requestedAt = now2
       executeBefore = addRelTime now2 (seconds 60)
-      extraArgs = ExtraArgs with
-        context = emptyChoiceContext
-        meta = emptyMetadata
+      extraArgs = requestExtraArgs mintReq.requestRef
 
   mintedPcTokenCid <- case usdcxToTreasuryResult.output of
     TransferInstructionResult_Pending with transferInstructionCid -> do
       submitMulti [issuer, treasury] [] do
-        exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+        exerciseCmd mintReqCid AcceptMintRequest with
           usdcxTransferInstructionCid = transferInstructionCid
           extraArgs = ExtraArgs with
             context = emptyChoiceContext
@@ -155,7 +148,9 @@ testSetup = script do
     exerciseCmd treasuryCid PullForOffchainTokenization with
       action = TreasuryAction with
         amount = 100.0
+        recipient = treasuryAdmin
         reason = "off-chain tokenization funding"
+        movementRef = "scenario-offchain-pull"
 
   -- Alice requests burn:
   -- 500 NAV at price 1.05 = 525 USDCx
@@ -163,6 +158,8 @@ testSetup = script do
     exerciseCmd offerCid RequestBurn with
       tokenAmount = 500.0
       minUsdcxOut = 524.0
+      requestNonce = "scenario-burn"
+  burnReq <- queryContractId alice burnReqCid >>= expectSome "expected burn request"
 
   treasuryUsdcxCid <- submit issuer do
     createCmd PCToken with
@@ -179,15 +176,13 @@ testSetup = script do
       transferAmount = 525.0
       requestedAt = now2
       executeBefore = addRelTime now2 (seconds 60)
-      extraArgs = ExtraArgs with
-        context = emptyChoiceContext
-        meta = emptyMetadata
+      extraArgs = requestExtraArgs burnReq.requestRef
 
   -- Alice burns actual PCToken and accepts the USDCx transfer back.
   case usdcxToAliceResult.output of
     TransferInstructionResult_Pending with transferInstructionCid -> do
       submitMulti [issuer, alice] [] do
-        exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+        exerciseCmd burnReqCid AcceptBurnRequest with
           pcTokenCid = mintedPcTokenCid
           usdcxTransferInstructionCid = transferInstructionCid
           extraArgs = ExtraArgs with

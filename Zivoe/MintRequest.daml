@@ -1,10 +1,46 @@
 module Zivoe.MintRequest where
 
 import Cip56.AllocationV1
+import Cip56.HoldingV1
 import Cip56.MetadataV1
-import Zivoe.PCToken
 import Cip56.TransferInstructionV1
+
+import Zivoe.PCToken
 import Zivoe.Types
+
+sumValidatedHoldings : Text -> Party -> InstrumentId -> [ContractId Holding] -> Update Decimal
+sumValidatedHoldings label expectedOwner expectedInstrument holdingCids =
+  case holdingCids of
+    [] -> pure 0.0
+    holdingCid :: rest -> do
+      holding <- fetch holdingCid
+      let holdingView = view holding
+
+      assertMsg (label <> " owner mismatch")
+        (holdingView.owner == expectedOwner)
+
+      assertMsg (label <> " instrument mismatch")
+        (holdingView.instrumentId == expectedInstrument)
+
+      restAmount <- sumValidatedHoldings label expectedOwner expectedInstrument rest
+      pure (holdingView.amount + restAmount)
+
+validateReceiverHoldings : Text -> Party -> InstrumentId -> Decimal -> [ContractId Holding] -> Update ()
+validateReceiverHoldings label expectedOwner expectedInstrument expectedAmount holdingCids = do
+  assertMsg (label <> " produced no receiver holding")
+    (not (null holdingCids))
+
+  totalAmount <- sumValidatedHoldings label expectedOwner expectedInstrument holdingCids
+
+  assertMsg (label <> " amount mismatch")
+    (totalAmount == expectedAmount)
+
+mintedTokenMetadata : Text -> Price -> Decimal -> Decimal -> Metadata
+mintedTokenMetadata requestRef quotedPrice usdcxAmount tokensOut =
+  metadataInsert requestRefMetadataKey requestRef
+    (metadataInsert priceIdMetadataKey quotedPrice.priceId
+      (metadataInsert paymentAmountMetadataKey (show usdcxAmount)
+        (metadataInsert navAmountMetadataKey (show tokensOut) emptyMetadata)))
 
 template MintRequest
   with
@@ -13,16 +49,20 @@ template MintRequest
     usdcxAmount : Decimal
     quotedPrice : Price
     minTokensOut : Decimal
-    automationOperators : [Party]
+    requestRef : Text
+    requestedAt : Time
+    acceptBefore : Time
   where
     signatory user
-    observer config.issuer, config.treasury, automationOperators
+    observer config.issuer, config.treasury
 
     ensure
       usdcxAmount > 0.0
       && minTokensOut > 0.0
-      && quotedPrice.value > 0.0
-      && quotedPrice.currency == config.paymentToken.symbol
+      && isValidPaymentPrice config quotedPrice
+      && requestRef /= ""
+      && quotedPrice.effectiveAt <= requestedAt
+      && requestedAt < acceptBefore
 
     choice CancelMintRequest : ()
       controller user
@@ -34,32 +74,20 @@ template MintRequest
       do
         pure ()
 
-    choice AcceptMintRequest : ()
-      controller config.issuer
-      do
-        let tokensOut = usdcxAmount / quotedPrice.value
-
-        assertMsg "slippage check failed"
-          (tokensOut >= minTokensOut)
-
-        -- TODO CIP-56:
-        -- 1. Transfer USDCx from user to config.treasury.
-        -- 2. Mint NAV token to user.
-        --
-        -- This is where the Canton Token Standard APIs will be called.
-
-        pure ()
-
-    choice AcceptMintRequestWithUsdcxTransfer : ContractId PCToken
+    choice AcceptMintRequest : ContractId PCToken
       with
         usdcxTransferInstructionCid : ContractId TransferInstruction
         extraArgs : ExtraArgs
       controller config.issuer, config.treasury
       do
-        let tokensOut = usdcxAmount / quotedPrice.value
+        now <- getTime
+        let tokensOut = tokensOutForMint usdcxAmount quotedPrice
 
         assertMsg "slippage check failed"
           (tokensOut >= minTokensOut)
+
+        assertMsg "mint request expired"
+          (acceptBefore > now)
 
         usdcxTransferInstruction <- fetch usdcxTransferInstructionCid
         let transfer = (view usdcxTransferInstruction).transfer
@@ -76,13 +104,18 @@ template MintRequest
         assertMsg "USDCx transfer instrument mismatch"
           (transfer.instrumentId == tokenRefToInstrumentId config.paymentToken)
 
+        assertMsg "USDCx transfer request ref mismatch"
+          (metadataContains requestRefMetadataKey requestRef transfer.meta)
+
+        assertMsg "USDCx transfer expired"
+          (transfer.executeBefore > now)
+
         transferResult <- exercise usdcxTransferInstructionCid TransferInstruction_Accept with
           extraArgs
 
         case transferResult.output of
           TransferInstructionResult_Completed with receiverHoldingCids -> do
-            assertMsg "USDCx transfer produced no treasury holding"
-              (not (null receiverHoldingCids))
+            validateReceiverHoldings "USDCx transfer" config.treasury (tokenRefToInstrumentId config.paymentToken) usdcxAmount receiverHoldingCids
           _ -> abort "USDCx transfer did not complete"
 
         create PCToken with
@@ -91,7 +124,7 @@ template MintRequest
           instrumentId = tokenRefToInstrumentId config.navToken
           amount = tokensOut
           lock = None
-          meta = emptyMetadata
+          meta = mintedTokenMetadata requestRef quotedPrice usdcxAmount tokensOut
 
     choice AcceptMintRequestWithUsdcxAllocation : ContractId PCToken
       with
@@ -99,10 +132,14 @@ template MintRequest
         extraArgs : ExtraArgs
       controller config.issuer, config.treasury, user
       do
-        let tokensOut = usdcxAmount / quotedPrice.value
+        now <- getTime
+        let tokensOut = tokensOutForMint usdcxAmount quotedPrice
 
         assertMsg "slippage check failed"
           (tokensOut >= minTokensOut)
+
+        assertMsg "mint request expired"
+          (acceptBefore > now)
 
         usdcxAllocation <- fetch usdcxAllocationCid
         let allocation = (view usdcxAllocation).allocation
@@ -117,17 +154,34 @@ template MintRequest
         assertMsg "USDCx allocation executor mismatch"
           (allocation.settlement.executor == config.issuer)
 
+        assertMsg "USDCx allocation settlement ref mismatch"
+          (allocation.settlement.settlementRef.id == requestRef)
+
+        assertMsg "USDCx allocation transfer leg id mismatch"
+          (allocation.transferLegId == "usdcx-leg")
+
+        assertMsg "USDCx allocation requestedAt is before request"
+          (allocation.settlement.requestedAt >= requestedAt)
+
+        assertMsg "USDCx allocation requestedAt is in the future"
+          (allocation.settlement.requestedAt <= now)
+
+        assertMsg "USDCx allocation deadline invalid"
+          (allocation.settlement.allocateBefore <= allocation.settlement.settleBefore)
+
         assertMsg "USDCx allocation amount mismatch"
           (transferLeg.amount == usdcxAmount)
 
         assertMsg "USDCx allocation instrument mismatch"
           (transferLeg.instrumentId == tokenRefToInstrumentId config.paymentToken)
 
+        assertMsg "USDCx allocation settlement expired"
+          (allocation.settlement.settleBefore > now)
+
         allocationResult <- exercise usdcxAllocationCid Allocation_ExecuteTransfer with
           extraArgs
 
-        assertMsg "USDCx allocation produced no treasury holding"
-          (not (null allocationResult.receiverHoldingCids))
+        validateReceiverHoldings "USDCx allocation" config.treasury (tokenRefToInstrumentId config.paymentToken) usdcxAmount allocationResult.receiverHoldingCids
 
         create PCToken with
           issuer = config.issuer
@@ -135,4 +189,4 @@ template MintRequest
           instrumentId = tokenRefToInstrumentId config.navToken
           amount = tokensOut
           lock = None
-          meta = emptyMetadata
+          meta = mintedTokenMetadata requestRef quotedPrice usdcxAmount tokensOut

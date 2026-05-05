@@ -1,5 +1,9 @@
 module Zivoe.Types where
 
+import DA.TextMap qualified as TextMap
+
+import Cip56.MetadataV1
+
 data TokenRef = TokenRef
   with
     registry : Party
@@ -27,15 +31,9 @@ data TokenConfig = TokenConfig
 data TreasuryAction = TreasuryAction
   with
     amount : Decimal
+    recipient : Party
     reason : Text
-  deriving (Eq, Show)
-
-data AutomationPolicy = AutomationPolicy
-  with
-    enabled : Bool
-    maxMintUsdcx : Decimal
-    maxBurnTokens : Decimal
-    operators : [Party]
+    movementRef : Text
   deriving (Eq, Show)
 
 containsParty : Party -> [Party] -> Bool
@@ -43,3 +41,47 @@ containsParty party parties =
   case parties of
     [] -> False
     p :: rest -> p == party || containsParty party rest
+
+isValidPaymentPrice : TokenConfig -> Price -> Bool
+isValidPaymentPrice config price =
+  price.value > 0.0
+  && price.currency == config.paymentToken.symbol
+  && price.priceId /= ""
+
+isValidTokenRef : Party -> TokenRef -> Bool
+isValidTokenRef expectedRegistry token =
+  token.registry == expectedRegistry
+  && token.symbol /= ""
+  && token.instrumentId /= ""
+
+tokensOutForMint : Decimal -> Price -> Decimal
+tokensOutForMint usdcxAmount navPrice =
+  usdcxAmount / navPrice.value
+
+usdcxOutForBurn : Decimal -> Price -> Decimal
+usdcxOutForBurn tokenAmount navPrice =
+  tokenAmount * navPrice.value
+
+requestRefMetadataKey : Text
+requestRefMetadataKey = "zivoe.com/request-ref"
+
+priceIdMetadataKey : Text
+priceIdMetadataKey = "zivoe.com/price-id"
+
+paymentAmountMetadataKey : Text
+paymentAmountMetadataKey = "zivoe.com/payment-amount"
+
+navAmountMetadataKey : Text
+navAmountMetadataKey = "zivoe.com/nav-amount"
+
+metadataLookup : Text -> Metadata -> Optional Text
+metadataLookup key metadata =
+  TextMap.lookup key metadata.values
+
+metadataInsert : Text -> Text -> Metadata -> Metadata
+metadataInsert key value metadata =
+  metadata with values = TextMap.insert key value metadata.values
+
+metadataContains : Text -> Text -> Metadata -> Bool
+metadataContains key expected metadata =
+  metadataLookup key metadata == Some expected

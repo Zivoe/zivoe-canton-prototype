@@ -1,69 +1,102 @@
 module Zivoe.Offer where
 
-import Zivoe.Types
-import Zivoe.MintRequest
+import DA.Time (addRelTime, seconds)
+
 import Zivoe.BurnRequest
+import Zivoe.MintRequest
+import Zivoe.Types
 
 template TokenOffer
   with
     config : TokenConfig
     user : Party
-    currentPrice : Price
-    automationOperators : [Party]
+    navPrice : Price
+    offerExpiresAt : Time
   where
     signatory config.issuer
-    observer user, config.treasury, automationOperators
+    observer user, config.treasury
 
     ensure
-      currentPrice.value > 0.0
-      && currentPrice.currency == config.paymentToken.symbol
+      isValidPaymentPrice config navPrice
 
     nonconsuming choice RequestMint : ContractId MintRequest
       with
         usdcxAmount : Decimal
         minTokensOut : Decimal
+        requestNonce : Text
       controller user
       do
+        now <- getTime
+
+        assertMsg "offer expired"
+          (offerExpiresAt > now)
+
+        assertMsg "NAV price is not yet effective"
+          (navPrice.effectiveAt <= now)
+
+        assertMsg "request nonce must not be empty"
+          (requestNonce /= "")
+
         assertMsg "USDCx amount must be positive"
           (usdcxAmount > 0.0)
 
         assertMsg "minTokensOut must be positive"
           (minTokensOut > 0.0)
 
-        let tokensOut = usdcxAmount / currentPrice.value
+        let tokensOut = tokensOutForMint usdcxAmount navPrice
 
         assertMsg "slippage check failed"
           (tokensOut >= minTokensOut)
+
+        let requestRef = "mint:" <> navPrice.priceId <> ":" <> requestNonce
 
         create MintRequest with
           config
           user
           usdcxAmount
-          quotedPrice = currentPrice
+          quotedPrice = navPrice
           minTokensOut
-          automationOperators
+          requestRef
+          requestedAt = now
+          acceptBefore = addRelTime now (seconds 300)
 
     nonconsuming choice RequestBurn : ContractId BurnRequest
       with
         tokenAmount : Decimal
         minUsdcxOut : Decimal
+        requestNonce : Text
       controller user
       do
+        now <- getTime
+
+        assertMsg "offer expired"
+          (offerExpiresAt > now)
+
+        assertMsg "NAV price is not yet effective"
+          (navPrice.effectiveAt <= now)
+
+        assertMsg "request nonce must not be empty"
+          (requestNonce /= "")
+
         assertMsg "token amount must be positive"
           (tokenAmount > 0.0)
 
         assertMsg "minUsdcxOut must be positive"
           (minUsdcxOut > 0.0)
 
-        let usdcxOut = tokenAmount * currentPrice.value
+        let usdcxOut = usdcxOutForBurn tokenAmount navPrice
 
         assertMsg "slippage check failed"
           (usdcxOut >= minUsdcxOut)
+
+        let requestRef = "burn:" <> navPrice.priceId <> ":" <> requestNonce
 
         create BurnRequest with
           config
           user
           tokenAmount
-          quotedPrice = currentPrice
+          quotedPrice = navPrice
           minUsdcxOut
-          automationOperators
+          requestRef
+          requestedAt = now
+          acceptBefore = addRelTime now (seconds 300)

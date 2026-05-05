@@ -1,88 +1,42 @@
 module Zivoe.IssuerRole where
 
+import DA.Time (addRelTime, seconds)
+
 import Zivoe.Types
-import Zivoe.MintRequest
-import Zivoe.BurnRequest
 import Zivoe.Offer
 
 template IssuerRole
   with
     config : TokenConfig
-    currentPrice : Price
-    automation : AutomationPolicy
+    navPrice : Price
   where
     signatory config.issuer
-    observer config.treasury, automation.operators
+    observer config.treasury
 
     ensure
-      currentPrice.value > 0.0
-      && currentPrice.currency == config.paymentToken.symbol
-      && automation.maxMintUsdcx >= 0.0
-      && automation.maxBurnTokens >= 0.0
+      isValidPaymentPrice config navPrice
 
     choice UpdatePrice : ContractId IssuerRole
       with
         newPrice : Price
       controller config.issuer
       do
-        assertMsg "price must be positive"
-          (newPrice.value > 0.0)
-
-        assertMsg "price currency must match payment token"
-          (newPrice.currency == config.paymentToken.symbol)
+        assertMsg "invalid NAV price"
+          (isValidPaymentPrice config newPrice)
 
         create this with
-          currentPrice = newPrice
+          navPrice = newPrice
 
     nonconsuming choice CreateOffer : ContractId TokenOffer
       with
         user : Party
       controller config.issuer
       do
+        now <- getTime
+
         create TokenOffer with
           config
           user
-          currentPrice
-          automationOperators = automation.operators
+          navPrice
+          offerExpiresAt = addRelTime now (seconds 300)
 
-    nonconsuming choice AutoAcceptMintRequest : ()
-      with
-        mintRequestCid : ContractId MintRequest
-        operator : Party
-      controller config.issuer, operator
-      do
-        assertMsg "automation disabled" automation.enabled
-
-        assertMsg "operator is not authorized"
-          (containsParty operator automation.operators)
-
-        req <- fetch mintRequestCid
-
-        assertMsg "mint request config mismatch"
-          (req.config == config)
-
-        assertMsg "mint too large for automation"
-          (req.usdcxAmount <= automation.maxMintUsdcx)
-
-        exercise mintRequestCid AcceptMintRequest
-
-    nonconsuming choice AutoAcceptBurnRequest : ()
-      with
-        burnRequestCid : ContractId BurnRequest
-        operator : Party
-      controller config.issuer, operator
-      do
-        assertMsg "automation disabled" automation.enabled
-
-        assertMsg "operator is not authorized"
-          (containsParty operator automation.operators)
-
-        req <- fetch burnRequestCid
-
-        assertMsg "burn request config mismatch"
-          (req.config == config)
-
-        assertMsg "burn too large for automation"
-          (req.tokenAmount <= automation.maxBurnTokens)
-
-        exercise burnRequestCid AcceptBurnRequest

@@ -1,0 +1,79 @@
+module Test.AuthorizationTests where
+
+import Daml.Script
+import DA.Time (addRelTime, seconds)
+
+import Cip56.TransferInstructionV1
+import Test.OfferIssuerTreasuryTests (createIssuerRole)
+import Test.Util
+import Zivoe.IssuerRole
+import Zivoe.PCToken
+import Zivoe.Treasury
+import Zivoe.Types
+
+pcTokenAuthorizationTest : Script ()
+pcTokenAuthorizationTest = script do
+  ctx <- setup ()
+  tokenCid <- createPcToken ctx ctx.alice 100.0
+  now <- getTime
+
+  submitMustFail ctx.bob do
+    exerciseCmd tokenCid Split with
+      splitAmount = 10.0
+
+  submitMustFail ctx.bob do
+    exerciseCmd tokenCid BurnAmount with
+      burnAmount = 10.0
+
+  submitMustFail ctx.bob do
+    exerciseCmd tokenCid InstructTransfer with
+      receiver = ctx.bob
+      transferAmount = 10.0
+      requestedAt = now
+      executeBefore = addRelTime now (seconds 60)
+      extraArgs = defaultExtraArgs
+
+transferInstructionAuthorizationTest : Script ()
+transferInstructionAuthorizationTest = script do
+  ctx <- setup ()
+  tokenCid <- createPcToken ctx ctx.alice 100.0
+  result <- instructTransfer ctx.alice tokenCid ctx.bob 10.0
+  transferInstructionCid <- expectPendingTransfer result
+
+  submitMustFail ctx.alice do
+    exerciseCmd transferInstructionCid TransferInstruction_Accept with
+      extraArgs = defaultExtraArgs
+
+  submitMustFail ctx.bob do
+    exerciseCmd transferInstructionCid TransferInstruction_Withdraw with
+      extraArgs = defaultExtraArgs
+
+issuerAndTreasuryAuthorizationTest : Script ()
+issuerAndTreasuryAuthorizationTest = script do
+  ctx <- setup ()
+  issuerRoleCid <- createIssuerRole ctx
+
+  submitMustFail ctx.bob do
+    exerciseCmd issuerRoleCid UpdatePrice with
+      newPrice = ctx.price with
+        value = 1.1
+
+  treasuryCid <- submit ctx.treasury do
+    createCmd TreasuryAccount with
+      config = ctx.config
+
+  submitMustFail ctx.bob do
+    exerciseCmd treasuryCid PullForOffchainTokenization with
+      action = TreasuryAction with
+        amount = 100.0
+        recipient = ctx.treasuryAdmin
+        reason = "unauthorized"
+        movementRef = "unauthorized-pull"
+
+  submitMustFail (actAs [ctx.treasuryAdmin, ctx.bob]) do
+    exerciseCmd treasuryCid PullForOffchainTokenization with
+      action = TreasuryAction with
+        amount = 100.0
+        recipient = ctx.treasuryAdmin
+        reason = "missing treasury"
+        movementRef = "missing-treasury-pull"

@@ -1,0 +1,63 @@
+module Test.RequestLifecycleTests where
+
+import Daml.Script
+
+import Test.OfferIssuerTreasuryTests (createOffer)
+import Test.Util
+import Zivoe.BurnRequest
+import Zivoe.MintRequest
+import Zivoe.Offer
+
+mintRequestCancelAndRejectTest : Script ()
+mintRequestCancelAndRejectTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+
+  cancelCid <- submit ctx.alice do
+    exerciseCmd offerCid RequestMint with
+      usdcxAmount = 1050.0
+      minTokensOut = 999.0
+      requestNonce = "cancel-mint"
+
+  submit ctx.alice do
+    exerciseCmd cancelCid CancelMintRequest
+
+  queryContractId ctx.alice cancelCid >>= expectNone "expected canceled mint request to be archived"
+
+  rejectCid <- submit ctx.alice do
+    exerciseCmd offerCid RequestMint with
+      usdcxAmount = 1050.0
+      minTokensOut = 999.0
+      requestNonce = "reject-mint"
+
+  submit ctx.issuer do
+    exerciseCmd rejectCid RejectMintRequest
+
+  queryContractId ctx.alice rejectCid >>= expectNone "expected rejected mint request to be archived"
+
+burnRequestCancelAndRejectTest : Script ()
+burnRequestCancelAndRejectTest = script do
+  ctx <- setup ()
+  offerCid <- createOffer ctx
+
+  cancelCid <- submit ctx.alice do
+    exerciseCmd offerCid RequestBurn with
+      tokenAmount = 500.0
+      minUsdcxOut = 524.0
+      requestNonce = "cancel-burn"
+
+  submit ctx.alice do
+    exerciseCmd cancelCid CancelBurnRequest
+
+  queryContractId ctx.alice cancelCid >>= expectNone "expected canceled burn request to be archived"
+
+  rejectCid <- submit ctx.alice do
+    exerciseCmd offerCid RequestBurn with
+      tokenAmount = 500.0
+      minUsdcxOut = 524.0
+      requestNonce = "reject-burn"
+
+  submit ctx.issuer do
+    exerciseCmd rejectCid RejectBurnRequest
+
+  queryContractId ctx.alice rejectCid >>= expectNone "expected rejected burn request to be archived"
