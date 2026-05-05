@@ -1,8 +1,38 @@
 module Zivoe.Treasury where
 
+import Cip56.HoldingV1
+import Cip56.MetadataV1
+import Cip56.TransferInstructionV1
+
+import Zivoe.PCToken
 import Zivoe.Types
-import Zivoe.MintRequest
-import Zivoe.BurnRequest
+
+sumValidatedHoldings : Text -> Party -> InstrumentId -> [ContractId Holding] -> Update Decimal
+sumValidatedHoldings label expectedOwner expectedInstrument holdingCids =
+  case holdingCids of
+    [] -> pure 0.0
+    holdingCid :: rest -> do
+      holding <- fetch holdingCid
+      let holdingView = view holding
+
+      assertMsg (label <> " owner mismatch")
+        (holdingView.owner == expectedOwner)
+
+      assertMsg (label <> " instrument mismatch")
+        (holdingView.instrumentId == expectedInstrument)
+
+      restAmount <- sumValidatedHoldings label expectedOwner expectedInstrument rest
+      pure (holdingView.amount + restAmount)
+
+validateReceiverHoldings : Text -> Party -> InstrumentId -> Decimal -> [ContractId Holding] -> Update ()
+validateReceiverHoldings label expectedOwner expectedInstrument expectedAmount holdingCids = do
+  assertMsg (label <> " produced no receiver holding")
+    (not (null holdingCids))
+
+  totalAmount <- sumValidatedHoldings label expectedOwner expectedInstrument holdingCids
+
+  assertMsg (label <> " amount mismatch")
+    (totalAmount == expectedAmount)
 
 template TreasuryAccount
   with
@@ -10,56 +40,6 @@ template TreasuryAccount
   where
     signatory config.treasury
     observer config.issuer, config.treasuryAdmin
-
-    nonconsuming choice DepositFromMint : ContractId TreasuryMovement
-      with
-        mintRequestCid : ContractId MintRequest
-      controller config.issuer, config.treasury
-      do
-        req <- fetch mintRequestCid
-
-        assertMsg "mint request config mismatch"
-          (req.config == config)
-
-        exercise mintRequestCid AcceptMintRequest
-
-        now <- getTime
-
-        create TreasuryMovement with
-          config
-          movementType = "MintDeposit"
-          token = config.paymentToken
-          amount = req.usdcxAmount
-          user = Some req.user
-          price = Some req.quotedPrice
-          reason = "USDCx collected for NAV mint"
-          recordedAt = now
-
-    nonconsuming choice ReturnForBurn : ContractId TreasuryMovement
-      with
-        burnRequestCid : ContractId BurnRequest
-      controller config.issuer, config.treasury
-      do
-        req <- fetch burnRequestCid
-
-        assertMsg "burn request config mismatch"
-          (req.config == config)
-
-        let usdcxOut = req.tokenAmount * req.quotedPrice.value
-
-        exercise burnRequestCid AcceptBurnRequest
-
-        now <- getTime
-
-        create TreasuryMovement with
-          config
-          movementType = "BurnReturn"
-          token = config.paymentToken
-          amount = usdcxOut
-          user = Some req.user
-          price = Some req.quotedPrice
-          reason = "USDCx returned for NAV burn"
-          recordedAt = now
 
     nonconsuming choice PullForOffchainTokenization : ContractId TreasuryMovement
       with
@@ -69,6 +49,15 @@ template TreasuryAccount
         assertMsg "amount must be positive"
           (action.amount > 0.0)
 
+        assertMsg "recipient cannot be treasury"
+          (action.recipient /= config.treasury)
+
+        assertMsg "reason must not be empty"
+          (action.reason /= "")
+
+        assertMsg "movement ref must not be empty"
+          (action.movementRef /= "")
+
         now <- getTime
 
         create TreasuryMovement with
@@ -76,9 +65,71 @@ template TreasuryAccount
           movementType = "OffchainTokenizationPull"
           token = config.paymentToken
           amount = action.amount
-          user = None
+          user = Some action.recipient
           price = None
           reason = action.reason
+          movementRef = action.movementRef
+          recordedAt = now
+
+    nonconsuming choice PullForOffchainTokenizationWithTransfer : ContractId TreasuryMovement
+      with
+        action : TreasuryAction
+        usdcxTransferInstructionCid : ContractId TransferInstruction
+        extraArgs : ExtraArgs
+      controller config.treasuryAdmin, config.treasury, action.recipient
+      do
+        now <- getTime
+
+        assertMsg "amount must be positive"
+          (action.amount > 0.0)
+
+        assertMsg "recipient cannot be treasury"
+          (action.recipient /= config.treasury)
+
+        assertMsg "reason must not be empty"
+          (action.reason /= "")
+
+        assertMsg "movement ref must not be empty"
+          (action.movementRef /= "")
+
+        usdcxTransferInstruction <- fetch usdcxTransferInstructionCid
+        let transfer = (view usdcxTransferInstruction).transfer
+
+        assertMsg "USDCx transfer sender mismatch"
+          (transfer.sender == config.treasury)
+
+        assertMsg "USDCx transfer receiver mismatch"
+          (transfer.receiver == action.recipient)
+
+        assertMsg "USDCx transfer amount mismatch"
+          (transfer.amount == action.amount)
+
+        assertMsg "USDCx transfer instrument mismatch"
+          (transfer.instrumentId == tokenRefToInstrumentId config.paymentToken)
+
+        assertMsg "USDCx transfer movement ref mismatch"
+          (metadataContains requestRefMetadataKey action.movementRef transfer.meta)
+
+        assertMsg "USDCx transfer expired"
+          (transfer.executeBefore > now)
+
+        transferResult <- exercise usdcxTransferInstructionCid TransferInstruction_Accept with
+          extraArgs
+
+        case transferResult.output of
+          TransferInstructionResult_Completed with receiverHoldingCids ->
+            validateReceiverHoldings "USDCx transfer" action.recipient (tokenRefToInstrumentId config.paymentToken) action.amount receiverHoldingCids
+          _ -> abort "USDCx transfer did not complete"
+
+        create TreasuryMovement with
+          config
+          movementType = "OffchainTokenizationPull"
+          token = config.paymentToken
+          amount = action.amount
+          user = Some action.recipient
+          price = None
+          reason = action.reason
+          movementRef = action.movementRef
           recordedAt = now
 
 template TreasuryMovement
@@ -90,9 +141,18 @@ template TreasuryMovement
     user : Optional Party
     price : Optional Price
     reason : Text
+    movementRef : Text
     recordedAt : Time
   where
-    signatory config.treasury
-    observer config.issuer, config.treasuryAdmin
+    signatory config.treasury, config.treasuryAdmin
+    observer config.issuer
 
-    ensure amount > 0.0
+    ensure
+      amount > 0.0
+      && movementType /= ""
+      && isValidTokenRef config.issuer token
+      && reason /= ""
+      && movementRef /= ""
+      && (case price of
+          None -> True
+          Some p -> isValidPaymentPrice config p)

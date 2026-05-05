@@ -16,6 +16,7 @@ createMintRequest ctx offerCid =
     exerciseCmd offerCid RequestMint with
       usdcxAmount = 1050.0
       minTokensOut = 999.0
+      requestNonce = "mint-settlement"
 
 createBurnRequest : TestContext -> ContractId TokenOffer -> Script (ContractId BurnRequest)
 createBurnRequest ctx offerCid =
@@ -23,11 +24,12 @@ createBurnRequest ctx offerCid =
     exerciseCmd offerCid RequestBurn with
       tokenAmount = 500.0
       minUsdcxOut = 524.0
+      requestNonce = "burn-settlement"
 
-createPendingUsdcxTransfer : TestContext -> Party -> Party -> Decimal -> Script (ContractId TransferInstruction)
-createPendingUsdcxTransfer ctx sender receiver amount = script do
+createPendingUsdcxTransfer : TestContext -> Party -> Party -> Decimal -> Text -> Script (ContractId TransferInstruction)
+createPendingUsdcxTransfer ctx sender receiver amount requestRef = script do
   usdcxCid <- createUsdcxToken ctx sender amount
-  result <- instructTransfer sender usdcxCid receiver amount
+  result <- instructTransferWithExtraArgs sender usdcxCid receiver amount (requestExtraArgs requestRef)
   expectPendingTransfer result
 
 mintWithUsdcxTransferTest : Script ()
@@ -35,10 +37,11 @@ mintWithUsdcxTransferTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   mintReqCid <- createMintRequest ctx offerCid
-  usdcxTransferInstructionCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.treasury 1050.0
+  mintReq <- queryContractId ctx.alice mintReqCid >>= expectSome "expected mint request"
+  usdcxTransferInstructionCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.treasury 1050.0 mintReq.requestRef
 
   mintedCid <- submit (actAs [ctx.issuer, ctx.treasury]) do
-    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+    exerciseCmd mintReqCid AcceptMintRequest with
       usdcxTransferInstructionCid
       extraArgs = defaultExtraArgs
 
@@ -52,18 +55,19 @@ mintRejectsWrongUsdcxTransferTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   mintReqCid <- createMintRequest ctx offerCid
+  mintReq <- queryContractId ctx.alice mintReqCid >>= expectSome "expected mint request"
 
-  wrongAmountTransferCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.treasury 1000.0
+  wrongAmountTransferCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.treasury 1000.0 mintReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.treasury]) do
-    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+    exerciseCmd mintReqCid AcceptMintRequest with
       usdcxTransferInstructionCid = wrongAmountTransferCid
       extraArgs = defaultExtraArgs
 
-  wrongReceiverTransferCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.bob 1050.0
+  wrongReceiverTransferCid <- createPendingUsdcxTransfer ctx ctx.alice ctx.bob 1050.0 mintReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.treasury]) do
-    exerciseCmd mintReqCid AcceptMintRequestWithUsdcxTransfer with
+    exerciseCmd mintReqCid AcceptMintRequest with
       usdcxTransferInstructionCid = wrongReceiverTransferCid
       extraArgs = defaultExtraArgs
 
@@ -72,7 +76,8 @@ mintWithUsdcxAllocationTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   mintReqCid <- createMintRequest ctx offerCid
-  usdcxAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.treasury 1050.0
+  mintReq <- queryContractId ctx.alice mintReqCid >>= expectSome "expected mint request"
+  usdcxAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.treasury 1050.0 mintReq.requestRef
 
   mintedCid <- submit (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
     exerciseCmd mintReqCid AcceptMintRequestWithUsdcxAllocation with
@@ -88,15 +93,16 @@ mintRejectsWrongUsdcxAllocationTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   mintReqCid <- createMintRequest ctx offerCid
+  mintReq <- queryContractId ctx.alice mintReqCid >>= expectSome "expected mint request"
 
-  wrongReceiverAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.bob 1050.0
+  wrongReceiverAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.bob 1050.0 mintReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
     exerciseCmd mintReqCid AcceptMintRequestWithUsdcxAllocation with
       usdcxAllocationCid = wrongReceiverAllocationCid
       extraArgs = defaultExtraArgs
 
-  wrongAmountAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.treasury 1000.0
+  wrongAmountAllocationCid <- createUsdcxAllocation ctx ctx.alice ctx.treasury 1000.0 mintReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
     exerciseCmd mintReqCid AcceptMintRequestWithUsdcxAllocation with
@@ -108,11 +114,12 @@ burnWithPCTokenAndUsdcxTransferTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   burnReqCid <- createBurnRequest ctx offerCid
+  burnReq <- queryContractId ctx.alice burnReqCid >>= expectSome "expected burn request"
   pcTokenCid <- createPcToken ctx ctx.alice 1000.0
-  usdcxTransferInstructionCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 525.0
+  usdcxTransferInstructionCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 525.0 burnReq.requestRef
 
   changeCids <- submit (actAs [ctx.issuer, ctx.alice]) do
-    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+    exerciseCmd burnReqCid AcceptBurnRequest with
       pcTokenCid
       usdcxTransferInstructionCid
       extraArgs = defaultExtraArgs
@@ -132,21 +139,22 @@ burnRejectsWrongPCTokenOrUsdcxTransferTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   burnReqCid <- createBurnRequest ctx offerCid
+  burnReq <- queryContractId ctx.alice burnReqCid >>= expectSome "expected burn request"
 
   wrongInstrumentCid <- createUsdcxToken ctx ctx.alice 1000.0
-  validUsdcxReturnCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 525.0
+  validUsdcxReturnCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 525.0 burnReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.alice]) do
-    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+    exerciseCmd burnReqCid AcceptBurnRequest with
       pcTokenCid = wrongInstrumentCid
       usdcxTransferInstructionCid = validUsdcxReturnCid
       extraArgs = defaultExtraArgs
 
   pcTokenCid <- createPcToken ctx ctx.alice 1000.0
-  wrongAmountUsdcxReturnCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 500.0
+  wrongAmountUsdcxReturnCid <- createPendingUsdcxTransfer ctx ctx.treasury ctx.alice 500.0 burnReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.alice]) do
-    exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxTransfer with
+    exerciseCmd burnReqCid AcceptBurnRequest with
       pcTokenCid
       usdcxTransferInstructionCid = wrongAmountUsdcxReturnCid
       extraArgs = defaultExtraArgs
@@ -156,8 +164,9 @@ burnWithPCTokenAndUsdcxAllocationTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   burnReqCid <- createBurnRequest ctx offerCid
+  burnReq <- queryContractId ctx.alice burnReqCid >>= expectSome "expected burn request"
   pcTokenCid <- createPcToken ctx ctx.alice 1000.0
-  usdcxAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.alice 525.0
+  usdcxAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.alice 525.0 burnReq.requestRef
 
   changeCids <- submit (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
     exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxAllocation with
@@ -176,9 +185,10 @@ burnRejectsWrongUsdcxAllocationTest = script do
   ctx <- setup ()
   offerCid <- createOffer ctx
   burnReqCid <- createBurnRequest ctx offerCid
+  burnReq <- queryContractId ctx.alice burnReqCid >>= expectSome "expected burn request"
   pcTokenCid <- createPcToken ctx ctx.alice 1000.0
 
-  wrongReceiverAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.bob 525.0
+  wrongReceiverAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.bob 525.0 burnReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
     exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxAllocation with
@@ -186,7 +196,7 @@ burnRejectsWrongUsdcxAllocationTest = script do
       usdcxAllocationCid = wrongReceiverAllocationCid
       extraArgs = defaultExtraArgs
 
-  wrongAmountAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.alice 500.0
+  wrongAmountAllocationCid <- createUsdcxAllocation ctx ctx.treasury ctx.alice 500.0 burnReq.requestRef
 
   submitMustFail (actAs [ctx.issuer, ctx.treasury, ctx.alice]) do
     exerciseCmd burnReqCid AcceptBurnRequestWithPCTokenAndUsdcxAllocation with

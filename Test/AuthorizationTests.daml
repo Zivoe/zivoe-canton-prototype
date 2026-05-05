@@ -66,10 +66,14 @@ issuerAndTreasuryAuthorizationTest = script do
     exerciseCmd treasuryCid PullForOffchainTokenization with
       action = TreasuryAction with
         amount = 100.0
+        recipient = ctx.treasuryAdmin
         reason = "unauthorized"
+        movementRef = "unauthorized-pull"
 
   submitMustFail (actAs [ctx.treasuryAdmin, ctx.bob]) do
     exerciseCmd treasuryCid PullForOffchainTokenization with
       action = TreasuryAction with
         amount = 100.0
+        recipient = ctx.treasuryAdmin
         reason = "missing treasury"
+        movementRef = "missing-treasury-pull"

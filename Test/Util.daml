@@ -1,6 +1,7 @@
 module Test.Util where
 
 import Daml.Script
+import DA.TextMap qualified as TextMap
 import DA.Time (addRelTime, seconds)
 
 import Cip56.AllocationV1
@@ -17,12 +18,10 @@ data TestContext = TestContext
     treasuryAdmin : Party
     alice : Party
     bob : Party
-    operator : Party
     usdcxRef : TokenRef
     navRef : TokenRef
     price : Price
     config : TokenConfig
-    automation : AutomationPolicy
 
 setup : () -> Script TestContext
 setup () = script do
@@ -31,7 +30,6 @@ setup () = script do
   treasuryAdmin <- allocateParty "TreasuryAdmin"
   alice <- allocateParty "Alice"
   bob <- allocateParty "Bob"
-  operator <- allocateParty "Operator"
 
   let usdcxRef = TokenRef with
         registry = issuer
@@ -58,29 +56,27 @@ setup () = script do
         navToken = navRef
         paymentToken = usdcxRef
 
-  let automation = AutomationPolicy with
-        enabled = True
-        maxMintUsdcx = 10000.0
-        maxBurnTokens = 10000.0
-        operators = [operator]
-
   pure TestContext with
     issuer
     treasury
     treasuryAdmin
     alice
     bob
-    operator
     usdcxRef
     navRef
     price
     config
-    automation
 
 defaultExtraArgs : ExtraArgs
 defaultExtraArgs = ExtraArgs with
   context = emptyChoiceContext
   meta = emptyMetadata
+
+requestExtraArgs : Text -> ExtraArgs
+requestExtraArgs requestRef = ExtraArgs with
+  context = emptyChoiceContext
+  meta = Metadata with
+    values = TextMap.singleton requestRefMetadataKey requestRef
 
 createPcToken : TestContext -> Party -> Decimal -> Script (ContractId PCToken)
 createPcToken ctx owner amount =
@@ -104,14 +100,14 @@ createUsdcxToken ctx owner amount =
       lock = None
       meta = emptyMetadata
 
-createUsdcxAllocation : TestContext -> Party -> Party -> Decimal -> Script (ContractId Allocation)
-createUsdcxAllocation ctx sender receiver amount = script do
+createUsdcxAllocation : TestContext -> Party -> Party -> Decimal -> Text -> Script (ContractId Allocation)
+createUsdcxAllocation ctx sender receiver amount requestRef = script do
   now <- getTime
 
   let settlement = SettlementInfo with
         executor = ctx.issuer
         settlementRef = Reference with
-          id = "test-settlement"
+          id = requestRef
           cid = None
         requestedAt = now
         allocateBefore = addRelTime now (seconds 60)
@@ -139,8 +135,8 @@ createUsdcxAllocation ctx sender receiver amount = script do
 
   pure (toInterfaceContractId allocationCid)
 
-instructTransfer : Party -> ContractId PCToken -> Party -> Decimal -> Script TransferInstructionResult
-instructTransfer sender holdingCid receiver amount = script do
+instructTransferWithExtraArgs : Party -> ContractId PCToken -> Party -> Decimal -> ExtraArgs -> Script TransferInstructionResult
+instructTransferWithExtraArgs sender holdingCid receiver amount extraArgs = script do
   now <- getTime
   submit sender do
     exerciseCmd holdingCid InstructTransfer with
@@ -148,7 +144,11 @@ instructTransfer sender holdingCid receiver amount = script do
       transferAmount = amount
       requestedAt = now
       executeBefore = addRelTime now (seconds 60)
-      extraArgs = defaultExtraArgs
+      extraArgs
+
+instructTransfer : Party -> ContractId PCToken -> Party -> Decimal -> Script TransferInstructionResult
+instructTransfer sender holdingCid receiver amount =
+  instructTransferWithExtraArgs sender holdingCid receiver amount defaultExtraArgs
 
 expectPendingTransfer : TransferInstructionResult -> Script (ContractId TransferInstruction)
 expectPendingTransfer result =

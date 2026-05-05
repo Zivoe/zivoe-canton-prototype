@@ -3,6 +3,7 @@ module Zivoe.PCToken where
 import Cip56.HoldingV1
 import Cip56.MetadataV1
 import Cip56.TransferInstructionV1
+
 import Zivoe.Types
 
 tokenRefToInstrumentId : TokenRef -> InstrumentId
@@ -10,6 +11,32 @@ tokenRefToInstrumentId tokenRef =
   InstrumentId with
     admin = tokenRef.registry
     id = tokenRef.instrumentId
+
+isLockActive : Time -> Optional Lock -> Bool
+isLockActive now lock =
+  case lock of
+    None -> False
+    Some Lock{..} ->
+      case expiresAt of
+        Some expiry ->
+          expiry > now || expiresAfter /= None
+        None -> True
+
+assertUnlocked : Text -> Optional Lock -> Update ()
+assertUnlocked action lock = do
+  now <- getTime
+  assertMsg (action <> " blocked by active lock")
+    (not (isLockActive now lock))
+
+createHolding : Party -> Party -> InstrumentId -> Decimal -> Optional Lock -> Metadata -> Update (ContractId PCToken)
+createHolding issuer owner instrumentId amount lock meta =
+  create PCToken with
+    issuer
+    owner
+    instrumentId
+    amount
+    lock
+    meta
 
 template PCToken
   with
@@ -23,24 +50,27 @@ template PCToken
     signatory issuer
     observer owner
 
-    ensure amount > 0.0
+    ensure
+      amount > 0.0
+      && instrumentId.admin == issuer
+      && instrumentId.id /= ""
 
     choice Split : (ContractId PCToken, ContractId PCToken)
       with
         splitAmount : Decimal
       controller owner
       do
+        assertUnlocked "split" lock
+
         assertMsg "split amount must be positive"
           (splitAmount > 0.0)
 
         assertMsg "split amount must be less than holding amount"
           (splitAmount < amount)
 
-        splitCid <- create this with
-          amount = splitAmount
+        splitCid <- createHolding issuer owner instrumentId splitAmount lock meta
 
-        remainderCid <- create this with
-          amount = amount - splitAmount
+        remainderCid <- createHolding issuer owner instrumentId (amount - splitAmount) lock meta
 
         pure (splitCid, remainderCid)
 
@@ -53,6 +83,8 @@ template PCToken
         extraArgs : ExtraArgs
       controller owner
       do
+        assertUnlocked "transfer" lock
+
         now <- getTime
 
         assertMsg "cannot transfer to current owner"
@@ -93,16 +125,13 @@ template PCToken
           senderChangeCids = []
           meta = extraArgs.meta
 
-    choice Burn : ()
-      controller owner
-      do
-        pure ()
-
     choice BurnAmount : [ContractId PCToken]
       with
         burnAmount : Decimal
       controller owner
       do
+        assertUnlocked "burn" lock
+
         assertMsg "burn amount must be positive"
           (burnAmount > 0.0)
 
@@ -112,8 +141,7 @@ template PCToken
         if burnAmount == amount then
           pure []
         else do
-          changeCid <- create this with
-            amount = amount - burnAmount
+          changeCid <- createHolding issuer owner instrumentId (amount - burnAmount) lock meta
           pure [changeCid]
 
     interface instance Holding for PCToken where
@@ -150,25 +178,18 @@ template PCTokenTransferInstruction
         meta = instructionMeta
 
       transferInstruction_acceptImpl _ arg = do
-        receiverHoldingCid <- create PCToken with
-          issuer
-          owner = transfer.receiver
-          instrumentId = transfer.instrumentId
-          amount = transfer.amount
-          lock = sourceLock
-          meta = sourceMeta
+        now <- getTime
+
+        assertMsg "transfer expired"
+          (transfer.executeBefore > now)
+
+        receiverHoldingCid <- createHolding issuer transfer.receiver transfer.instrumentId transfer.amount sourceLock sourceMeta
 
         senderChangeCids <-
           if sourceAmount == transfer.amount then
             pure []
           else do
-            senderChangeCid <- create PCToken with
-              issuer
-              owner = transfer.sender
-              instrumentId = transfer.instrumentId
-              amount = sourceAmount - transfer.amount
-              lock = sourceLock
-              meta = sourceMeta
+            senderChangeCid <- createHolding issuer transfer.sender transfer.instrumentId (sourceAmount - transfer.amount) sourceLock sourceMeta
             pure [toInterfaceContractId senderChangeCid]
 
         pure TransferInstructionResult with
@@ -178,13 +199,7 @@ template PCTokenTransferInstruction
           meta = arg.extraArgs.meta
 
       transferInstruction_rejectImpl _ arg = do
-        senderHoldingCid <- create PCToken with
-          issuer
-          owner = transfer.sender
-          instrumentId = transfer.instrumentId
-          amount = sourceAmount
-          lock = sourceLock
-          meta = sourceMeta
+        senderHoldingCid <- createHolding issuer transfer.sender transfer.instrumentId sourceAmount sourceLock sourceMeta
 
         pure TransferInstructionResult with
           output = TransferInstructionResult_Failed
@@ -192,13 +207,7 @@ template PCTokenTransferInstruction
           meta = arg.extraArgs.meta
 
       transferInstruction_withdrawImpl _ arg = do
-        senderHoldingCid <- create PCToken with
-          issuer
-          owner = transfer.sender
-          instrumentId = transfer.instrumentId
-          amount = sourceAmount
-          lock = sourceLock
-          meta = sourceMeta
+        senderHoldingCid <- createHolding issuer transfer.sender transfer.instrumentId sourceAmount sourceLock sourceMeta
 
         pure TransferInstructionResult with
           output = TransferInstructionResult_Failed

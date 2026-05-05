@@ -1,10 +1,39 @@
 module Zivoe.BurnRequest where
 
 import Cip56.AllocationV1
+import Cip56.HoldingV1
 import Cip56.MetadataV1
-import Zivoe.PCToken
 import Cip56.TransferInstructionV1
+
+import Zivoe.PCToken
 import Zivoe.Types
+
+sumValidatedHoldings : Text -> Party -> InstrumentId -> [ContractId Holding] -> Update Decimal
+sumValidatedHoldings label expectedOwner expectedInstrument holdingCids =
+  case holdingCids of
+    [] -> pure 0.0
+    holdingCid :: rest -> do
+      holding <- fetch holdingCid
+      let holdingView = view holding
+
+      assertMsg (label <> " owner mismatch")
+        (holdingView.owner == expectedOwner)
+
+      assertMsg (label <> " instrument mismatch")
+        (holdingView.instrumentId == expectedInstrument)
+
+      restAmount <- sumValidatedHoldings label expectedOwner expectedInstrument rest
+      pure (holdingView.amount + restAmount)
+
+validateReceiverHoldings : Text -> Party -> InstrumentId -> Decimal -> [ContractId Holding] -> Update ()
+validateReceiverHoldings label expectedOwner expectedInstrument expectedAmount holdingCids = do
+  assertMsg (label <> " produced no receiver holding")
+    (not (null holdingCids))
+
+  totalAmount <- sumValidatedHoldings label expectedOwner expectedInstrument holdingCids
+
+  assertMsg (label <> " amount mismatch")
+    (totalAmount == expectedAmount)
 
 template BurnRequest
   with
@@ -13,16 +42,20 @@ template BurnRequest
     tokenAmount : Decimal
     quotedPrice : Price
     minUsdcxOut : Decimal
-    automationOperators : [Party]
+    requestRef : Text
+    requestedAt : Time
+    acceptBefore : Time
   where
     signatory user
-    observer config.issuer, config.treasury, automationOperators
+    observer config.issuer, config.treasury
 
     ensure
       tokenAmount > 0.0
       && minUsdcxOut > 0.0
-      && quotedPrice.value > 0.0
-      && quotedPrice.currency == config.paymentToken.symbol
+      && isValidPaymentPrice config quotedPrice
+      && requestRef /= ""
+      && quotedPrice.effectiveAt <= requestedAt
+      && requestedAt < acceptBefore
 
     choice CancelBurnRequest : ()
       controller user
@@ -34,36 +67,29 @@ template BurnRequest
       do
         pure ()
 
-    choice AcceptBurnRequest : ()
-      controller config.issuer
-      do
-        let usdcxOut = tokenAmount * quotedPrice.value
-
-        assertMsg "slippage check failed"
-          (usdcxOut >= minUsdcxOut)
-
-        -- TODO CIP-56:
-        -- 1. Burn or redeem user's NAV token.
-        -- 2. Transfer USDCx from config.treasury to user.
-
-        pure ()
-
-    choice AcceptBurnRequestWithPCTokenAndUsdcxTransfer : [ContractId PCToken]
+    choice AcceptBurnRequest : [ContractId PCToken]
       with
         pcTokenCid : ContractId PCToken
         usdcxTransferInstructionCid : ContractId TransferInstruction
         extraArgs : ExtraArgs
       controller config.issuer, user
       do
-        let usdcxOut = tokenAmount * quotedPrice.value
+        now <- getTime
+        let usdcxOut = usdcxOutForBurn tokenAmount quotedPrice
 
         assertMsg "slippage check failed"
           (usdcxOut >= minUsdcxOut)
+
+        assertMsg "burn request expired"
+          (acceptBefore > now)
 
         pcToken <- fetch pcTokenCid
 
         assertMsg "PCToken owner mismatch"
           (pcToken.owner == user)
+
+        assertMsg "PCToken issuer mismatch"
+          (pcToken.issuer == config.issuer)
 
         assertMsg "PCToken instrument mismatch"
           (pcToken.instrumentId == tokenRefToInstrumentId config.navToken)
@@ -83,6 +109,12 @@ template BurnRequest
         assertMsg "USDCx transfer instrument mismatch"
           (transfer.instrumentId == tokenRefToInstrumentId config.paymentToken)
 
+        assertMsg "USDCx transfer request ref mismatch"
+          (metadataContains requestRefMetadataKey requestRef transfer.meta)
+
+        assertMsg "USDCx transfer expired"
+          (transfer.executeBefore > now)
+
         changeCids <- exercise pcTokenCid BurnAmount with
           burnAmount = tokenAmount
 
@@ -91,8 +123,7 @@ template BurnRequest
 
         case transferResult.output of
           TransferInstructionResult_Completed with receiverHoldingCids -> do
-            assertMsg "USDCx transfer produced no user holding"
-              (not (null receiverHoldingCids))
+            validateReceiverHoldings "USDCx transfer" user (tokenRefToInstrumentId config.paymentToken) usdcxOut receiverHoldingCids
           _ -> abort "USDCx transfer did not complete"
 
         pure changeCids
@@ -104,15 +135,22 @@ template BurnRequest
         extraArgs : ExtraArgs
       controller config.issuer, config.treasury, user
       do
-        let usdcxOut = tokenAmount * quotedPrice.value
+        now <- getTime
+        let usdcxOut = usdcxOutForBurn tokenAmount quotedPrice
 
         assertMsg "slippage check failed"
           (usdcxOut >= minUsdcxOut)
+
+        assertMsg "burn request expired"
+          (acceptBefore > now)
 
         pcToken <- fetch pcTokenCid
 
         assertMsg "PCToken owner mismatch"
           (pcToken.owner == user)
+
+        assertMsg "PCToken issuer mismatch"
+          (pcToken.issuer == config.issuer)
 
         assertMsg "PCToken instrument mismatch"
           (pcToken.instrumentId == tokenRefToInstrumentId config.navToken)
@@ -130,11 +168,29 @@ template BurnRequest
         assertMsg "USDCx allocation executor mismatch"
           (allocation.settlement.executor == config.issuer)
 
+        assertMsg "USDCx allocation settlement ref mismatch"
+          (allocation.settlement.settlementRef.id == requestRef)
+
+        assertMsg "USDCx allocation transfer leg id mismatch"
+          (allocation.transferLegId == "usdcx-leg")
+
+        assertMsg "USDCx allocation requestedAt is before request"
+          (allocation.settlement.requestedAt >= requestedAt)
+
+        assertMsg "USDCx allocation requestedAt is in the future"
+          (allocation.settlement.requestedAt <= now)
+
+        assertMsg "USDCx allocation deadline invalid"
+          (allocation.settlement.allocateBefore <= allocation.settlement.settleBefore)
+
         assertMsg "USDCx allocation amount mismatch"
           (transferLeg.amount == usdcxOut)
 
         assertMsg "USDCx allocation instrument mismatch"
           (transferLeg.instrumentId == tokenRefToInstrumentId config.paymentToken)
+
+        assertMsg "USDCx allocation settlement expired"
+          (allocation.settlement.settleBefore > now)
 
         changeCids <- exercise pcTokenCid BurnAmount with
           burnAmount = tokenAmount
@@ -142,7 +198,6 @@ template BurnRequest
         allocationResult <- exercise usdcxAllocationCid Allocation_ExecuteTransfer with
           extraArgs
 
-        assertMsg "USDCx allocation produced no user holding"
-          (not (null allocationResult.receiverHoldingCids))
+        validateReceiverHoldings "USDCx allocation" user (tokenRefToInstrumentId config.paymentToken) usdcxOut allocationResult.receiverHoldingCids
 
         pure changeCids
