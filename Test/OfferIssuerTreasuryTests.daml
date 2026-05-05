@@ -4,7 +4,6 @@ import Daml.Script
 
 import Test.Util
 import Zivoe.IssuerRole
-import Zivoe.Offer
 import Zivoe.Treasury
 import Zivoe.Types
 
@@ -14,50 +13,48 @@ createIssuerRole ctx =
     createCmd IssuerRole with
       config = ctx.config
       navPrice = ctx.price
+      requesters = [ctx.alice, ctx.bob]
 
-createOffer : TestContext -> Script (ContractId TokenOffer)
-createOffer ctx = script do
-  issuerRoleCid <- createIssuerRole ctx
-  submit ctx.issuer do
-    exerciseCmd issuerRoleCid CreateOffer with
-      user = ctx.alice
-
-offerCreatesRequestsTest : Script ()
-offerCreatesRequestsTest = script do
+issuerRoleCreatesRequestsTest : Script ()
+issuerRoleCreatesRequestsTest = script do
   ctx <- setup ()
-  offerCid <- createOffer ctx
+  issuerRoleCid <- createIssuerRole ctx
 
   mintReqCid <- submit ctx.alice do
-    exerciseCmd offerCid RequestMint with
+    exerciseCmd issuerRoleCid RequestMint with
+      user = ctx.alice
       usdcxAmount = 1050.0
       minTokensOut = 999.0
-      requestNonce = "offer-mint"
+      requestNonce = "issuer-role-mint"
 
   mintReq <- queryContractId ctx.alice mintReqCid >>= expectSome "expected mint request"
   assertMsg "mint request amount mismatch" (mintReq.usdcxAmount == 1050.0)
 
   burnReqCid <- submit ctx.alice do
-    exerciseCmd offerCid RequestBurn with
+    exerciseCmd issuerRoleCid RequestBurn with
+      user = ctx.alice
       tokenAmount = 500.0
       minUsdcxOut = 524.0
-      requestNonce = "offer-burn"
+      requestNonce = "issuer-role-burn"
 
   burnReq <- queryContractId ctx.alice burnReqCid >>= expectSome "expected burn request"
   assertMsg "burn request amount mismatch" (burnReq.tokenAmount == 500.0)
 
-offerRejectsBadSlippageTest : Script ()
-offerRejectsBadSlippageTest = script do
+issuerRoleRejectsBadSlippageTest : Script ()
+issuerRoleRejectsBadSlippageTest = script do
   ctx <- setup ()
-  offerCid <- createOffer ctx
+  issuerRoleCid <- createIssuerRole ctx
 
   submitMustFail ctx.alice do
-    exerciseCmd offerCid RequestMint with
+    exerciseCmd issuerRoleCid RequestMint with
+      user = ctx.alice
       usdcxAmount = 1050.0
       minTokensOut = 1001.0
       requestNonce = "bad-mint-slippage"
 
   submitMustFail ctx.alice do
-    exerciseCmd offerCid RequestBurn with
+    exerciseCmd issuerRoleCid RequestBurn with
+      user = ctx.alice
       tokenAmount = 500.0
       minUsdcxOut = 526.0
       requestNonce = "bad-burn-slippage"
@@ -77,12 +74,15 @@ issuerRoleValidationTest = script do
       newPrice = ctx.price with
         value = 0.0
 
-  offerCid <- submit ctx.issuer do
-    exerciseCmd issuerRoleCid CreateOffer with
-      user = ctx.alice
+  updatedCid <- submit ctx.issuer do
+    exerciseCmd issuerRoleCid UpdatePrice with
+      newPrice = ctx.price with
+        value = 1.1
+        priceId = "price-002"
 
-  offer <- queryContractId ctx.issuer offerCid >>= expectSome "expected offer"
-  assertMsg "offer config mismatch" (offer.config == ctx.config)
+  updated <- queryContractId ctx.issuer updatedCid >>= expectSome "expected updated issuer role"
+  assertMsg "issuer role config mismatch" (updated.config == ctx.config)
+  assertMsg "issuer role price mismatch" (updated.navPrice.value == 1.1)
 
 treasuryMovementTest : Script ()
 treasuryMovementTest = script do
