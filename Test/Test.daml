@@ -9,7 +9,6 @@ import Cip56.MetadataV1
 import Zivoe.BurnRequest
 import Zivoe.IssuerRole
 import Zivoe.MintRequest
-import Zivoe.Offer
 import Zivoe.PCToken
 import Zivoe.Treasury
 import Cip56.TransferInstructionV1
@@ -83,6 +82,7 @@ testSetup = script do
     createCmd IssuerRole with
       config = config
       navPrice = price
+      requesters = [alice, bob]
 
   treasuryCid <- submit treasury do
     createCmd TreasuryAccount with
@@ -101,14 +101,11 @@ testSetup = script do
     exerciseCmd issuerRoleCid UpdatePrice with
       newPrice = newPrice
 
-  offerCid <- submit issuer do
-    exerciseCmd issuerRoleCid2 CreateOffer with
-      user = alice
-
   -- Alice requests mint:
   -- 1,050 USDCx at price 1.05 = 1,000 NAV tokens
   mintReqCid <- submit alice do
-    exerciseCmd offerCid RequestMint with
+    exerciseCmd issuerRoleCid2 RequestMint with
+      user = alice
       usdcxAmount = 1050.0
       minTokensOut = 999.0
       requestNonce = "scenario-mint"
@@ -155,7 +152,8 @@ testSetup = script do
   -- Alice requests burn:
   -- 500 NAV at price 1.05 = 525 USDCx
   burnReqCid <- submit alice do
-    exerciseCmd offerCid RequestBurn with
+    exerciseCmd issuerRoleCid2 RequestBurn with
+      user = alice
       tokenAmount = 500.0
       minUsdcxOut = 524.0
       requestNonce = "scenario-burn"

@@ -2,19 +2,20 @@ module Test.RequestLifecycleTests where
 
 import Daml.Script
 
-import Test.OfferIssuerTreasuryTests (createOffer)
+import Test.OfferIssuerTreasuryTests (createIssuerRole)
 import Test.Util
 import Zivoe.BurnRequest
+import Zivoe.IssuerRole
 import Zivoe.MintRequest
-import Zivoe.Offer
 
 mintRequestCancelAndRejectTest : Script ()
 mintRequestCancelAndRejectTest = script do
   ctx <- setup ()
-  offerCid <- createOffer ctx
+  issuerRoleCid <- createIssuerRole ctx
 
   cancelCid <- submit ctx.alice do
-    exerciseCmd offerCid RequestMint with
+    exerciseCmd issuerRoleCid RequestMint with
+      user = ctx.alice
       usdcxAmount = 1050.0
       minTokensOut = 999.0
       requestNonce = "cancel-mint"
@@ -25,7 +26,8 @@ mintRequestCancelAndRejectTest = script do
   queryContractId ctx.alice cancelCid >>= expectNone "expected canceled mint request to be archived"
 
   rejectCid <- submit ctx.alice do
-    exerciseCmd offerCid RequestMint with
+    exerciseCmd issuerRoleCid RequestMint with
+      user = ctx.alice
       usdcxAmount = 1050.0
       minTokensOut = 999.0
       requestNonce = "reject-mint"
@@ -38,10 +40,11 @@ mintRequestCancelAndRejectTest = script do
 burnRequestCancelAndRejectTest : Script ()
 burnRequestCancelAndRejectTest = script do
   ctx <- setup ()
-  offerCid <- createOffer ctx
+  issuerRoleCid <- createIssuerRole ctx
 
   cancelCid <- submit ctx.alice do
-    exerciseCmd offerCid RequestBurn with
+    exerciseCmd issuerRoleCid RequestBurn with
+      user = ctx.alice
       tokenAmount = 500.0
       minUsdcxOut = 524.0
       requestNonce = "cancel-burn"
@@ -52,7 +55,8 @@ burnRequestCancelAndRejectTest = script do
   queryContractId ctx.alice cancelCid >>= expectNone "expected canceled burn request to be archived"
 
   rejectCid <- submit ctx.alice do
-    exerciseCmd offerCid RequestBurn with
+    exerciseCmd issuerRoleCid RequestBurn with
+      user = ctx.alice
       tokenAmount = 500.0
       minUsdcxOut = 524.0
       requestNonce = "reject-burn"
