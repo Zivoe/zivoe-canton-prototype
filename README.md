@@ -168,6 +168,98 @@ cancelled or withdrawn.
 
 It is test support, not part of the production Zivoe application surface.
 
+## Privacy Model
+
+The prototype uses Daml's contract visibility and authorization model to make
+the tokenization workflow privacy-preserving at the contract level. Privacy is
+not treated as a generic label; it is expressed through the signatories,
+observers, controllers, and sub-transactions on each template.
+
+### Program And Role Visibility
+
+`IssuerRole` is the issuer-published program contract. The issuer is the
+signatory, while the treasury and configured `requesters` are observers. This
+means the issuer controls the authoritative token configuration and NAV price,
+but only the treasury and listed requesters can see that particular role
+contract and exercise user request choices against it.
+
+The `RequestMint` and `RequestBurn` choices are controlled by the user, not the
+issuer. This lets a qualified requester independently submit a mint or burn
+request from an issuer-published price, while the `requesters` observer list
+acts as the visibility boundary for who can interact with that role.
+
+### Request Privacy
+
+`MintRequest` and `BurnRequest` are signed by the user and observed by the issuer
+and treasury. This reflects the request-based vault pattern: the participant's
+intended deposit or redemption is visible to the parties that need to process it,
+but it is not broadcast to unrelated participants.
+
+The controllers enforce the approval path:
+
+- The user controls cancellation.
+- The issuer controls rejection.
+- Mint acceptance requires issuer and treasury authorization.
+- Burn acceptance requires issuer and user authorization, with treasury included
+  in allocation-based burn settlement.
+
+The request contracts carry the quoted price, amount, slippage floor, request
+reference, and deadline. Those details are therefore visible to the user, issuer,
+and treasury, but not to parties outside the contract's stakeholder set.
+
+### Holding Privacy
+
+`PCToken` is the vault share holding in this prototype. The issuer is the
+signatory and the token owner is the observer. This means the issuer can attest
+to the existence and validity of issued holdings, while each holder can see only
+their own holding contracts unless they are explicitly made a stakeholder of
+another workflow.
+
+The owner controls `Split`, `InstructTransfer`, and `BurnAmount`. This keeps
+balance-level actions under the holder's authorization while still preserving
+issuer visibility over the resulting holdings. Because `PCToken` implements the
+CIP-56 `Holding` interface, authorized wallets and settlement workflows can read
+standardized holding views without exposing those holdings to unrelated parties.
+
+### Transfer Privacy
+
+`PCTokenTransferInstruction` is signed by the issuer and observed by the sender
+and receiver. The sender controls creation through `PCToken.InstructTransfer`;
+the receiver controls accept/reject; and the sender controls withdraw.
+
+This creates a narrow visibility set for peer transfers: the issuer, sender, and
+receiver see the transfer instruction, but other token holders do not. When the
+receiver accepts, the sub-transaction creates a receiver holding and optional
+sender change. Daml sub-transaction privacy limits visibility of those child
+events to the stakeholders of the resulting contracts and the authorizing
+parties needed for the exercised choice.
+
+### Treasury Privacy
+
+`TreasuryAccount` is signed by the treasury and observed by the issuer and
+treasury admin. Treasury movement choices require the treasury admin and treasury
+as controllers, and the transfer-backed path also requires the recipient. This
+maps the operational treasury pattern to explicit Daml authorization: treasury
+fund movements cannot be recorded unilaterally by an unrelated party.
+
+`TreasuryMovement` is signed by the treasury and treasury admin, with the issuer
+as observer. These records provide an audit trail for off-chain tokenization
+pulls while keeping the record scoped to the operational parties that need to
+see it.
+
+### Settlement Privacy
+
+Mint and burn acceptance fetch and validate CIP-56 `TransferInstruction` or
+`Allocation` contracts rather than relying on off-ledger assertions. The
+acceptance choices check sender, receiver, amount, instrument, request reference,
+deadlines, and settlement executor before minting or burning shares.
+
+This means the settlement facts needed to complete a request are disclosed only
+through the relevant settlement contracts and sub-transactions. The issuer,
+treasury, user, and transfer/allocation counterparties see the pieces they are
+stakeholders of; unrelated vault participants do not gain visibility into the
+request, settlement instruction, or resulting holdings.
+
 ## Supporting Types
 
 `Zivoe.Types` defines the shared domain model:
